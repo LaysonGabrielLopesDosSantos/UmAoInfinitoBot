@@ -15,27 +15,32 @@ executar:
     python bot_um_ao_infinito.py
 
 se o fichas.db for de uma versao anterior, ele e migrado automaticamente e uma
-copia de seguranca e salva como fichas.db.bak-antes-da-v3
+copia de seguranca e salva na pasta backups/
 """
 
 import asyncio
+import datetime
 import json
 import os
 import random
 import re
 import shutil
 import sqlite3
+import time
 import traceback
 import unicodedata
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 # ----------------------------------------------------------------------------
 # configuracoes
 # ----------------------------------------------------------------------------
 PASTA = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PASTA, "fichas.db")
+PASTA_BACKUPS = os.path.join(PASTA, "backups")
+BACKUPS_GUARDADOS = 7          # backups diarios mantidos
+VALIDADE_LIXEIRA = 30 * 60     # segundos que uma exclusao pode ser desfeita com !restaurar
 MAX_FICHAS = 2          # limite padrao de fichas por pessoa (admin pode mudar)
 LIMITE_ATRIBUTO = 20    # pontos maximos por atributo
 ASPAS = '"“”'
@@ -62,7 +67,7 @@ def precisa_migrar() -> bool:
     c = sqlite3.connect(DB_PATH)
     try:
         cols = [r[1] for r in c.execute("PRAGMA table_info(fichas)")]
-        if cols and ("xp" not in cols or "ordem" not in cols):
+        if cols and ("xp" in cols or "ordem" not in cols):
             return True
         tem_status = c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='status'").fetchone()
         if tem_status and c.execute("SELECT 1 FROM status WHERE tipo IN ('static', 'dynamic') LIMIT 1").fetchone():
@@ -73,8 +78,10 @@ def precisa_migrar() -> bool:
 
 
 if precisa_migrar():
-    shutil.copy2(DB_PATH, DB_PATH + ".bak-antes-da-v3")
-    print("copia de seguranca salva em fichas.db.bak-antes-da-v3")
+    os.makedirs(PASTA_BACKUPS, exist_ok=True)
+    _destino = os.path.join(PASTA_BACKUPS, f"fichas-antes-da-migracao-{datetime.datetime.now():%Y%m%d-%H%M%S}.db")
+    shutil.copy2(DB_PATH, _destino)
+    print(f"copia de seguranca salva em {_destino}")
 
 db = sqlite3.connect(DB_PATH)
 db.row_factory = sqlite3.Row
@@ -86,7 +93,6 @@ CREATE TABLE IF NOT EXISTS fichas (
     dono_id INTEGER NOT NULL,
     nome TEXT NOT NULL COLLATE NOCASE,
     nivel INTEGER NOT NULL DEFAULT 1,
-    xp INTEGER NOT NULL DEFAULT 0,
     ordem INTEGER NOT NULL DEFAULT 0,
     forca INTEGER NOT NULL DEFAULT 0,
     resistencia INTEGER NOT NULL DEFAULT 0,
@@ -134,6 +140,22 @@ CREATE TABLE IF NOT EXISTS habilidades (
     duracao INTEGER,
     UNIQUE (ficha_id, nome)
 );
+CREATE TABLE IF NOT EXISTS lixeira (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    tipo TEXT NOT NULL,
+    descricao TEXT NOT NULL,
+    dados TEXT NOT NULL,
+    criado_em INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS historico (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ficha_id INTEGER NOT NULL REFERENCES fichas(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    texto TEXT NOT NULL,
+    criado_em INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS config (
     guild_id INTEGER PRIMARY KEY,
     limite_padrao INTEGER NOT NULL
@@ -153,7 +175,20 @@ def garantir_coluna(tabela, coluna, definicao):
         db.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {definicao}")
 
 
-garantir_coluna("fichas", "xp", "INTEGER NOT NULL DEFAULT 0")
+
+
+def remover_coluna_xp():
+    """o xp foi removido do bot; tira a coluna dos bancos antigos (ha backup antes da migracao)."""
+    cols = [r["name"] for r in db.execute("PRAGMA table_info(fichas)")]
+    if "xp" in cols:
+        try:
+            db.execute("ALTER TABLE fichas DROP COLUMN xp")
+            db.commit()
+        except sqlite3.OperationalError as erro:
+            print("nao foi possivel remover a coluna xp (ela fica sem uso):", erro)
+
+
+remover_coluna_xp()
 garantir_coluna("itens", "tipo", "TEXT NOT NULL DEFAULT 'estatico'")
 garantir_coluna("fichas", "ordem", "INTEGER NOT NULL DEFAULT 0")
 db.execute("UPDATE status SET tipo='estatico' WHERE tipo='static'")
@@ -164,6 +199,21 @@ db.commit()
 # ----------------------------------------------------------------------------
 # utilidades gerais
 # ----------------------------------------------------------------------------
+def fazer_backup():
+    """uma copia do banco por dia, na pasta backups/; guarda as mais recentes."""
+    os.makedirs(PASTA_BACKUPS, exist_ok=True)
+    destino = os.path.join(PASTA_BACKUPS, f"fichas-{datetime.date.today().isoformat()}.db")
+    if not os.path.exists(destino):
+        copia = sqlite3.connect(destino)
+        try:
+            db.backup(copia)
+        finally:
+            copia.close()
+    todos = sorted(n for n in os.listdir(PASTA_BACKUPS) if re.fullmatch(r"fichas-\d{4}-\d{2}-\d{2}\.db", n))
+    for nome in todos[:-BACKUPS_GUARDADOS]:
+        os.remove(os.path.join(PASTA_BACKUPS, nome))
+
+
 def norm(texto: str) -> str:
     """minusculas e sem acentos."""
     t = unicodedata.normalize("NFD", texto.lower().strip())
@@ -246,15 +296,21 @@ def candidatos_nome(rows, nome: str, chave: str = "nome", substring: bool = True
     return []
 
 
-def achar_nome(rows, nome: str, chave: str = "nome", exato: bool = False, substring: bool = True):
+def achar_nome(rows, nome: str, chave: str = "nome", exato: bool = False, substring: bool = True,
+               seguro: bool = False):
     """ignora maiusculas e acentos. exato=True: so nome igual. senao aceita o comeco do nome
-    (autocompletar); se mais de um nome combinar, nao escolhe nenhum."""
+    (autocompletar); se mais de um nome combinar, nao escolhe nenhum.
+    seguro=True (comandos que apagam): so nome igual ou comeco do nome com pelo menos 3 letras."""
     alvo = norm(nome)
     for r in rows:
         if norm(r[chave]) == alvo:
             return r
     if exato:
         return None
+    if seguro:
+        if len(compacto(nome)) < 3:
+            return None
+        substring = False
     achados = candidatos_nome(rows, nome, chave, substring)
     return achados[0] if len(achados) == 1 else None
 
@@ -288,9 +344,9 @@ async def checar_edicao(ctx, ficha) -> bool:
 # ----------------------------------------------------------------------------
 # fichas: acesso e calculos
 # ----------------------------------------------------------------------------
-def get_ficha(guild_id, nome, exato=False, substring=True):
+def get_ficha(guild_id, nome, exato=False, substring=True, seguro=False):
     rows = db.execute("SELECT * FROM fichas WHERE guild_id=?", (guild_id,)).fetchall()
-    return achar_nome(rows, nome, exato=exato, substring=substring)
+    return achar_nome(rows, nome, exato=exato, substring=substring, seguro=seguro)
 
 
 def candidatos_ficha(guild_id, nome, substring=True):
@@ -317,22 +373,24 @@ def renumerar(guild_id, dono_id):
     db.commit()
 
 
-def get_item(ficha_id, nome, exato=False):
-    return achar_nome(db.execute("SELECT * FROM itens WHERE ficha_id=?", (ficha_id,)).fetchall(), nome, exato=exato)
+def get_item(ficha_id, nome, exato=False, seguro=False):
+    return achar_nome(db.execute("SELECT * FROM itens WHERE ficha_id=?", (ficha_id,)).fetchall(), nome,
+                      exato=exato, seguro=seguro)
 
 
-def get_status(ficha_id, nome, exato=False):
-    return achar_nome(db.execute("SELECT * FROM status WHERE ficha_id=?", (ficha_id,)).fetchall(), nome, exato=exato)
+def get_status(ficha_id, nome, exato=False, seguro=False):
+    return achar_nome(db.execute("SELECT * FROM status WHERE ficha_id=?", (ficha_id,)).fetchall(), nome,
+                      exato=exato, seguro=seguro)
 
 
-def get_nota(ficha_id, titulo, exato=False):
+def get_nota(ficha_id, titulo, exato=False, seguro=False):
     return achar_nome(db.execute("SELECT * FROM notas WHERE ficha_id=?", (ficha_id,)).fetchall(), titulo, "titulo",
-                      exato=exato)
+                      exato=exato, seguro=seguro)
 
 
-def get_habilidade(ficha_id, nome, exato=False):
+def get_habilidade(ficha_id, nome, exato=False, seguro=False):
     return achar_nome(db.execute("SELECT * FROM habilidades WHERE ficha_id=?", (ficha_id,)).fetchall(), nome,
-                      exato=exato)
+                      exato=exato, seguro=seguro)
 
 
 def msg_ficha_nao_achada(guild_id, nome) -> str:
@@ -444,11 +502,51 @@ def validar_nome(nome: str):
     return None
 
 
+def cortar_lista(itens, limite=900) -> str:
+    """junta nomes por virgula sem passar do limite de um campo do embed (1024)."""
+    if not itens:
+        return "—"
+    texto = ""
+    for i, it in enumerate(itens):
+        novo = (", " if texto else "") + it
+        if len(texto) + len(novo) > limite:
+            return texto + f" … e mais {len(itens) - i}"
+        texto += novo
+    return texto
+
+
+def limpar_lixeira():
+    db.execute("DELETE FROM lixeira WHERE criado_em < ?", (int(time.time()) - VALIDADE_LIXEIRA,))
+    db.commit()
+
+
+def serializar_ficha(f) -> dict:
+    """tudo que pertence a uma ficha, para poder restaurar depois."""
+    d = {k: f[k] for k in f.keys() if k != "id"}
+    fid = f["id"]
+    d["itens"] = [{k: r[k] for k in ("nome", "quantidade", "bonus", "equipado", "tipo")}
+                  for r in db.execute("SELECT * FROM itens WHERE ficha_id=?", (fid,))]
+    d["status"] = [{k: r[k] for k in ("nome", "tipo", "bonus", "duracao")}
+                   for r in db.execute("SELECT * FROM status WHERE ficha_id=?", (fid,))]
+    d["notas"] = [{k: r[k] for k in ("titulo", "texto")}
+                  for r in db.execute("SELECT * FROM notas WHERE ficha_id=?", (fid,))]
+    d["habilidades"] = [{k: r[k] for k in ("nome", "bonus", "duracao")}
+                        for r in db.execute("SELECT * FROM habilidades WHERE ficha_id=?", (fid,))]
+    return d
+
+
+def guardar_lixeira(ctx, tipo: str, descricao: str, dados):
+    limpar_lixeira()
+    db.execute("INSERT INTO lixeira (guild_id, user_id, tipo, descricao, dados, criado_em) VALUES (?, ?, ?, ?, ?, ?)",
+               (ctx.guild.id, ctx.author.id, tipo, descricao, json.dumps(dados), int(time.time())))
+    db.commit()
+
+
 def embed_ficha(f) -> discord.Embed:
     bonus = get_bonus(f["id"])
     vigor, vontade = maximos(f, bonus)
     emb = discord.Embed(title=f"📜 {f['nome']}", color=discord.Color.dark_gold())
-    emb.description = f"jogador: <@{f['dono_id']}> • ordem #{f['ordem']} • nivel {fmt_nivel(f['nivel'])} • xp {f['xp']}"
+    emb.description = f"jogador: <@{f['dono_id']}> • ordem #{f['ordem']} • nivel {fmt_nivel(f['nivel'])}"
     linhas = []
     for k, sg in ATRIBUTOS.items():
         b = bonus.get(k, 0)
@@ -464,12 +562,24 @@ def embed_ficha(f) -> discord.Embed:
           for r in db.execute("SELECT nome, equipado, quantidade FROM itens WHERE ficha_id=? AND equipado>0",
                               (f["id"],))]
     st = [r["nome"] for r in db.execute("SELECT nome FROM status WHERE ficha_id=?", (f["id"],))]
-    emb.add_field(name="equipados", value=", ".join(eq) or "—", inline=False)
-    emb.add_field(name="status", value=", ".join(st) or "—", inline=False)
+    emb.add_field(name="equipados", value=cortar_lista(eq), inline=False)
+    emb.add_field(name="status", value=cortar_lista(st), inline=False)
+    hs = [f"{'🟢' if get_status(f['id'], r['nome'], exato=True) else '⚪'} {r['nome']}"
+          for r in db.execute("SELECT nome FROM habilidades WHERE ficha_id=? ORDER BY nome", (f["id"],))]
+    emb.add_field(name="habilidades", value=cortar_lista(hs), inline=False)
     return emb
 
 
-PALAVRAS_RESERVADAS = {"corpo", "mente", "crp", "mnt", "vigor", "vgr", "vontade", "vtd", "nivel", "xp",
+def registrar_alvo(ctx, f):
+    """marca a ficha como alvo do comando em andamento (usado pelo historico)."""
+    alvos = getattr(ctx, "_alvos", None)
+    if alvos is None:
+        alvos = ctx._alvos = []
+    if f["id"] not in alvos:
+        alvos.append(f["id"])
+
+
+PALAVRAS_RESERVADAS = {"corpo", "mente", "crp", "mnt", "vigor", "vgr", "vontade", "vtd", "nivel",
                        "estatico", "dinamico", "consumivel", "persistente", "livre", "padrao", "reset", "sim"}
 
 
@@ -534,8 +644,10 @@ async def resolver(ctx, tokens, editar=False, numero_e_valor=False, sem_resto=Fa
     if sem_resto and resto:
         await ctx.send(f"nao entendi **{resto[0][0]}**. use o nome da ficha ou a ordem (`#1`, `#2`...).")
         return None, None
-    if editar and not await checar_edicao(ctx, ficha):
-        return None, None
+    if editar:
+        if not await checar_edicao(ctx, ficha):
+            return None, None
+        registrar_alvo(ctx, ficha)
     return ficha, resto
 
 
@@ -560,9 +672,16 @@ async def so_em_servidor(ctx):
     return True
 
 
+@tasks.loop(hours=6)
+async def backup_periodico():
+    fazer_backup()
+
+
 @bot.event
 async def on_ready():
     print(f"conectado como {bot.user} (id {bot.user.id})")
+    if not backup_periodico.is_running():
+        backup_periodico.start()
 
 
 @bot.event
@@ -578,59 +697,199 @@ async def on_command_error(ctx, erro):
     await ctx.send("⚠️ ocorreu um erro inesperado. confira o formato do comando com `!ajuda`.")
 
 
+class ConfirmarView(discord.ui.View):
+    """botoes confirmar / cancelar; so quem usou o comando pode responder."""
+
+    def __init__(self, autor_id):
+        super().__init__(timeout=30)
+        self.autor_id = autor_id
+        self.resultado = None
+
+    async def _responder(self, interaction, valor):
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message("so quem usou o comando pode responder.", ephemeral=True)
+            return
+        self.resultado = valor
+        await interaction.response.edit_message(view=None)
+        self.stop()
+
+    @discord.ui.button(label="confirmar", style=discord.ButtonStyle.danger)
+    async def btn_confirmar(self, interaction, button):
+        await self._responder(interaction, True)
+
+    @discord.ui.button(label="cancelar", style=discord.ButtonStyle.secondary)
+    async def btn_cancelar(self, interaction, button):
+        await self._responder(interaction, False)
+
+
 async def confirmar(ctx, texto: str) -> bool:
-    await ctx.send(f"⚠️ {texto} responda `sim` em 20 segundos.")
-
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and m.content.lower().strip() in ("sim", "s")
-
-    try:
-        await bot.wait_for("message", check=check, timeout=20)
-    except asyncio.TimeoutError:
+    view = ConfirmarView(ctx.author.id)
+    msg = await ctx.send(f"⚠️ {texto}", view=view)
+    await view.wait()
+    if view.resultado is None:
+        try:
+            await msg.edit(content=f"⚠️ {texto}\n⌛ tempo esgotado, cancelado.", view=None)
+        except Exception:
+            pass
+        return False
+    if not view.resultado:
         await ctx.send("cancelado.")
         return False
     return True
 
 
+# comandos que mudam a ficha e entram no historico (so se algo mudou de fato no banco)
+COMANDOS_QUE_ALTERAM = {
+    "mudar", "nivel", "pegar", "descartar", "equipar", "desequipar", "usaritem", "addstatus", "rmstatus",
+    "renomearitem", "renomearstatus", "renomearnota", "anotar", "editarnota", "apagar", "limpar", "queimar",
+    "criarhabilidade", "usarhabilidade", "desativarhabilidade", "apagarhabilidade", "renomearhabilidade",
+    "renomearficha", "mudardono", "dano", "turno",
+}
+
+
+@bot.before_invoke
+async def antes_do_comando(ctx):
+    ctx._alteracoes_antes = db.total_changes
+
+
+@bot.after_invoke
+async def depois_do_comando(ctx):
+    alvos = getattr(ctx, "_alvos", None)
+    if not alvos or ctx.command is None or ctx.command.name not in COMANDOS_QUE_ALTERAM:
+        return
+    if db.total_changes == getattr(ctx, "_alteracoes_antes", None):
+        return  # o comando nao mudou nada (ex.: erro de validacao)
+    texto = ctx.message.content[:300]
+    agora = int(time.time())
+    for fid in alvos:
+        if not get_ficha_id(fid):
+            continue
+        db.execute("INSERT INTO historico (ficha_id, user_id, texto, criado_em) VALUES (?, ?, ?, ?)",
+                   (fid, ctx.author.id, texto, agora))
+        db.execute("DELETE FROM historico WHERE ficha_id=? AND id NOT IN "
+                   "(SELECT id FROM historico WHERE ficha_id=? ORDER BY id DESC LIMIT 100)", (fid, fid))
+    db.commit()
+
+
+AJUDA = [
+    # (categoria, comando, uso, descricao, exemplo)
+    ("fichas", "fichas", "!fichas [@pessoa] [pagina]", "lista as fichas do servidor (15 por pagina), com a ordem de cada uma", "!fichas @maria 2"),
+    ("fichas", "criarficha", "!criarficha [nome] [@dono]", "cria uma ficha vazia; o @dono e so para admins; o limite de fichas por pessoa e definido pelos admins", "!criarficha Kage"),
+    ("fichas", "deletarficha", "!deletarficha [nome1] [nome2] ...", "apaga uma ou varias fichas (pede confirmacao; da para desfazer com !restaurar); exige o nome ou pelo menos 3 letras do comeco", "!deletarficha Kage Douma"),
+    ("fichas", "olharficha", "!olharficha [nome]", "mostra a ficha completa; sem nome mostra as suas", "!olharficha kage"),
+    ("fichas", "renomearficha", "!renomearficha [pers] [novo nome]", "troca o nome da ficha", "!renomearficha Kage KageYaeger"),
+    ("fichas", "ordem", "!ordem [pers] [posicao]", "sem argumentos mostra a ordem das suas fichas; com personagem e posicao move a ficha; a #1 e a padrao dos comandos", "!ordem #2 1"),
+    ("fichas", "copiarficha", "!copiarficha [pers] [novo nome] [@dono]", "copia a ficha inteira (atributos, itens, status, habilidades e notas)", "!copiarficha Kage Clone"),
+    ("fichas", "matar", "!matar [@pessoa]", "apaga todas as suas fichas (admins podem indicar outra pessoa); pede confirmacao", ""),
+    ("atributos", "mudar", "!mudar [pers] [sigla] [valor|+n|-n] [sigla2] [valor2] ...", "muda atributos (for res agi com int sab car pre) e corpo/mente (crp mnt); vigor e vontade sao calculados", "!mudar for +2 res -1 agi 3"),
+    ("atributos", "nivel", "!nivel [pers] [valor|+n|-n]", "ve ou muda o nivel (1 a 20); -1 ou livre = sem limite de pontos", "!nivel 5"),
+    ("atributos", "vida", "!vida [pers]", "mostra corpo, mente e as penalidades atuais", ""),
+    ("combate", "d20", "!d20 | !d20 [pers] [sigla] [habilidade] | !d20 [pers1] [pers2] [sigla]", "sem nada rola um d20 puro; com sigla rola d20 + atributo; com dois ou mais personagens e a sigla no fim e uma briga: o maior vence (diferenca de ate 4 e empate)", "!d20 agi cortelinear"),
+    ("combate", "iniciativa", "!iniciativa [pers1] [pers2] ...", "cada um rola agilidade e a ordem sai do maior para o menor, com desempate automatico", "!iniciativa Kage Douma"),
+    ("combate", "dano", "!dano [rolagem de dano] [res|sab] [rolagem de defesa] [pers]", "calcula o dano (diferenca de ate 4 = sem dano); res tira do corpo, sab da mente; com o personagem no fim, aplica o dano", "!dano 20 res 12 kage"),
+    ("combate", "turno", "!turno [pers1, pers2, ...]", "passa o turno: aplica status dinamicos e reduz a duracao de status e habilidades", "!turno Kage, Douma"),
+    ("itens", "inventario", "!inventario [pers]", "mostra o inventario", ""),
+    ("itens", "pegar", "!pegar [pers] [item] [qtd] [tipo] [+sigla,-sigla] [valores]", "adiciona item; tipo estatico (equipavel, da bonus) ou consumivel (efeito em crp/mnt ao usar)", "!pegar espada 1 estatico +for,-agi 3,1"),
+    ("itens", "descartar", "!descartar [pers] [item] [qtd]", "remove o item (ou so a quantidade informada); exige o nome ou pelo menos 3 letras do comeco", "!descartar pocao 2"),
+    ("itens", "equipar", "!equipar [pers] [item]", "equipa uma unidade do item (o bonus soma por unidade)", "!equipar espada"),
+    ("itens", "desequipar", "!desequipar [pers] [item]", "tira uma unidade equipada", "!desequipar espada"),
+    ("itens", "equipados", "!equipados [pers]", "mostra os itens equipados e o bonus total", ""),
+    ("itens", "usaritem", "!usaritem [pers] [item]", "usa um consumivel: gasta uma unidade e aplica o efeito em corpo/mente", "!usaritem pocao"),
+    ("itens", "renomearitem", "!renomearitem [pers] [item] [novo nome]", "troca o nome do item", ""),
+    ("itens", "limpar", "!limpar [pers]", "apaga todos os itens do inventario (pede confirmacao; da para desfazer)", ""),
+    ("status", "addstatus", "!addstatus [pers] [nome] [dinamico|estatico] [+sigla,-sigla] [valores] [turnos]", "dinamico muda corpo/mente a cada turno; estatico mantem bonus ou penalidade; turnos e opcional", "!addstatus veneno dinamico -crp 3 4"),
+    ("status", "status", "!status [pers]", "mostra os status ativos", ""),
+    ("status", "rmstatus", "!rmstatus [pers] [nome]", "remove um status; exige o nome ou pelo menos 3 letras do comeco", ""),
+    ("status", "renomearstatus", "!renomearstatus [pers] [nome] [novo nome]", "troca o nome do status", ""),
+    ("habilidades", "criarhabilidade", "!criarhabilidade [pers] [nome] [+sigla,-sigla] [valores] [persistente|turnos]", "cria habilidade; sem duracao vale so o turno atual; crp/mnt tem efeito imediato ao usar", "!criarhabilidade Kage CorteLinear +for,+agi 2,5"),
+    ("habilidades", "habilidades", "!habilidades [pers]", "lista as habilidades e quais estao ativas", ""),
+    ("habilidades", "usarhabilidade", "!usarhabilidade [pers] [habilidade]", "ativa a habilidade (bonus em todas as rolagens ate acabar) ou aplica o efeito imediato", "!usarhabilidade Cura"),
+    ("habilidades", "desativarhabilidade", "!desativarhabilidade [pers] [habilidade]", "desativa uma habilidade ativa", ""),
+    ("habilidades", "apagarhabilidade", "!apagarhabilidade [pers] [habilidade]", "apaga a habilidade; exige o nome ou pelo menos 3 letras do comeco", ""),
+    ("habilidades", "renomearhabilidade", "!renomearhabilidade [pers] [habilidade] [novo nome]", "troca o nome da habilidade", ""),
+    ("notas", "anotar", "!anotar [pers] [nome da nota] [texto]", "cria uma nota (poderes, pericias, o que quiser)", "!anotar Kage poder Bankai ..."),
+    ("notas", "notas", "!notas [pers] [nota]", "mostra todas as notas ou uma so", ""),
+    ("notas", "editarnota", "!editarnota [pers] [nota] [novo texto]", "troca o texto da nota", ""),
+    ("notas", "renomearnota", "!renomearnota [pers] [nota] [novo nome]", "troca o nome da nota", ""),
+    ("notas", "apagar", "!apagar [pers] [nota]", "apaga uma nota; exige o nome ou pelo menos 3 letras do comeco", ""),
+    ("notas", "queimar", "!queimar [pers]", "apaga todas as notas (pede confirmacao; da para desfazer)", ""),
+    ("seguranca", "historico", "!historico [pers] [quantidade]", "mostra as ultimas alteracoes da ficha (quem fez e quando); so o dono e admins veem", "!historico kage 15"),
+    ("seguranca", "restaurar", "!restaurar [lista|numero]", "desfaz a ultima exclusao (fichas, itens ou notas) feita nos ultimos 30 minutos", "!restaurar lista"),
+    ("admin", "mudardono", "!mudardono [pers] [@novo dono]", "passa a ficha para outra pessoa", ""),
+    ("admin", "limitefichas", "!limitefichas [@pessoa] [n|padrao]", "define quantas fichas essa pessoa pode ter; sem n mostra o limite", ""),
+    ("admin", "limitepadrao", "!limitepadrao [n]", "define o limite padrao de fichas por pessoa", ""),
+]
+CATEGORIAS = ["fichas", "atributos", "combate", "itens", "status", "habilidades", "notas", "seguranca", "admin"]
+
+
 @bot.command(name="ajuda")
-async def ajuda(ctx):
-    await enviar_longo(ctx, (
-        "**comandos** (nomes com espaco: use aspas; no lugar do nome pode usar a ordem da ficha, ex. `#2`; "
-        "sem nada, vale a sua ficha #1; basta escrever o comeco do nome, ex. `Kage` para `KageYaeger`)\n"
-        "**fichas:** `!fichas` • `!criarficha [nome] [@dono]` • `!deletarficha [nome1] [nome2] ...` • `!olharficha [nome]` • "
-        "`!renomearficha [pers] [novo nome]` • `!ordem [pers] [posicao]` • `!copiarficha [pers] [novo nome] [@dono]` • `!matar [@pessoa]`\n"
-        "**atributos:** `!mudar [pers] [sigla] [valor|+n|-n] [sigla2] [valor2]...` (for res agi com int sab car pre crp mnt) • "
-        "`!nivel [pers] [valor|+n|-n|-1 livre]` • `!xp [pers] [valor|+n|-n]` • `!vida [pers]` • `!d20` (puro) • `!d20 [pers] [sigla] [habilidade]` • `!d20 [pers1] [pers2] [sigla]` (briga) • `!dano [rolagem] [res|sab] [defesa] [pers]` • `!iniciativa [pers1] [pers2] ...`\n"
-        "**itens:** `!inventario [pers]` • `!pegar [pers] [item] [qtd] [tipo] [+sigla,-sigla] [valores]` "
-        "(tipo: estatico ou consumivel, opcional) • `!descartar [pers] [item] [qtd]` • `!equipar [pers] [item]` • "
-        "`!desequipar [pers] [item]` • `!equipados [pers]` • `!usaritem [pers] [item]` • "
-        "`!renomearitem [pers] [item] [novo nome]` • `!limpar [pers]`\n"
-        "**status:** `!addstatus [pers] [nome] [dinamico|estatico] [+sigla,-sigla] [valores] [turnos]` • "
-        "`!status [pers]` • `!rmstatus [pers] [nome]` • `!renomearstatus [pers] [nome] [novo nome]` • "
-        "`!turno [pers1, pers2, ...]`\n"
-        "**habilidades:** `!criarhabilidade [pers] [nome] [+sigla,-sigla] [valores] [persistente|turnos]` • "
-        "`!habilidades [pers]` • `!usarhabilidade [pers] [nome]` • `!desativarhabilidade [pers] [nome]` • "
-        "`!apagarhabilidade [pers] [nome]` • `!renomearhabilidade [pers] [nome] [novo nome]`\n"
-        "**notas:** `!anotar [pers] [nome da nota] [texto]` • `!notas [pers] [nota]` • "
-        "`!editarnota [pers] [nota] [novo texto]` • `!renomearnota [pers] [nota] [novo nome]` • "
-        "`!apagar [pers] [nota]` • `!queimar [pers]`\n"
-        "**admin:** `!mudardono [pers] [@novo dono]` • `!limitefichas [@pessoa] [n|padrao]` • `!limitepadrao [n]`"
-    ))
+async def ajuda(ctx, *, raw: str = ""):
+    arg = norm(raw).lstrip("!").strip()
+    if not arg:
+        linhas = [f"**{c}:** " + " ".join(f"`{e[1]}`" for e in AJUDA if e[0] == c) for c in CATEGORIAS]
+        await enviar_longo(ctx, "**ajuda** — use `!ajuda [categoria]` ou `!ajuda [comando]`\n" + "\n".join(linhas)
+                           + "\n\n**dicas:** nomes com espaco: use aspas • no lugar do nome vale a ordem (`#2`) ou so o "
+                             "comeco do nome (`Kage` para `KageYaeger`) • sem nome, vale a sua ficha #1")
+        return
+    if arg in CATEGORIAS:
+        linhas = [f"`{e[2]}` — {e[3]}" for e in AJUDA if e[0] == arg]
+        await enviar_longo(ctx, f"**{arg}**\n" + "\n".join(linhas))
+        return
+    achados = [e for e in AJUDA if e[1] == arg]
+    if not achados:
+        achados = [e for e in AJUDA if e[1].startswith(arg)]
+        cats = [c for c in CATEGORIAS if c.startswith(arg)]
+        if len(achados) + len(cats) != 1:
+            if not achados and not cats:
+                await ctx.send(f"nao conheco **{arg}**. use `!ajuda` para ver as categorias.")
+            else:
+                opcoes = [f"`{e[1]}`" for e in achados] + [f"`{c}`" for c in cats]
+                await ctx.send("qual deles? " + ", ".join(opcoes))
+            return
+        if cats:
+            await ajuda(ctx, raw=cats[0])
+            return
+    e = achados[0]
+    texto = f"**!{e[1]}** — {e[3]}\nuso: `{e[2]}`"
+    if e[4]:
+        texto += f"\nexemplo: `{e[4]}`"
+    await enviar_longo(ctx, texto)
 
 
 # ----------------------------------------------------------------------------
 # fichas
 # ----------------------------------------------------------------------------
 @bot.command(name="fichas")
-async def fichas(ctx):
-    rows = db.execute(
-        "SELECT nome, dono_id, nivel, ordem FROM fichas WHERE guild_id=? ORDER BY nome", (ctx.guild.id,)
-    ).fetchall()
-    if not rows:
-        await ctx.send("nenhuma ficha criada ainda. use `!criarficha [nome]`.")
+async def fichas(ctx, *, raw: str = ""):
+    dono = ctx.message.mentions[0] if ctx.message.mentions else None
+    resto = re.sub(r"<@!?\d+>", "", raw).strip()
+    if resto and not (resto.isdigit() and int(resto) >= 1):
+        await ctx.send("uso: `!fichas [@pessoa] [pagina]`")
         return
-    linhas = [f"• **{r['nome']}** (nv {fmt_nivel(r['nivel'])}) — <@{r['dono_id']}> #{r['ordem']}" for r in rows]
-    await enviar_longo(ctx, f"📚 **{len(rows)} ficha(s) criada(s):**\n" + "\n".join(linhas))
+    pagina = int(resto) if resto else 1
+    if dono:
+        rows = db.execute("SELECT nome, dono_id, nivel, ordem FROM fichas WHERE guild_id=? AND dono_id=? ORDER BY ordem",
+                          (ctx.guild.id, dono.id)).fetchall()
+    else:
+        rows = db.execute("SELECT nome, dono_id, nivel, ordem FROM fichas WHERE guild_id=? ORDER BY nome",
+                          (ctx.guild.id,)).fetchall()
+    if not rows:
+        await ctx.send("nenhuma ficha encontrada. use `!criarficha [nome]`.")
+        return
+    por_pagina = 15
+    paginas = (len(rows) + por_pagina - 1) // por_pagina
+    if pagina > paginas:
+        await ctx.send(f"so existem {paginas} pagina(s).")
+        return
+    fatia = rows[(pagina - 1) * por_pagina: pagina * por_pagina]
+    linhas = [f"• **{r['nome']}** (nv {fmt_nivel(r['nivel'])}) — <@{r['dono_id']}> #{r['ordem']}" for r in fatia]
+    titulo = f"📚 **{len(rows)} ficha(s)**" + (f" de <@{dono.id}>" if dono else "")
+    if paginas > 1:
+        titulo += f" — pagina {pagina}/{paginas}"
+    texto = titulo + "\n" + "\n".join(linhas)
+    if pagina < paginas:
+        texto += f"\nmais: `!fichas [@pessoa] {pagina + 1}`"
+    await enviar_longo(ctx, texto)
 
 
 @bot.command(name="criarficha")
@@ -689,7 +948,7 @@ async def deletarficha(ctx, *, raw: str = ""):
         alvos = [minhas[0]]
     for n in nomes:
         n = n.strip().strip(ASPAS).strip()
-        f = get_ficha(ctx.guild.id, n)
+        f = get_ficha(ctx.guild.id, n, seguro=True)
         if not f:
             m = re.fullmatch(r"#?(\d+)", n)
             if m and 1 <= int(m.group(1)) <= len(minhas):
@@ -715,6 +974,7 @@ async def deletarficha(ctx, *, raw: str = ""):
         pergunta = f"apagar {len(alvos)} fichas ({lista}) com itens, status, habilidades e notas?"
     if not await confirmar(ctx, pergunta):
         return
+    guardar_lixeira(ctx, "fichas", ", ".join(f["nome"] for f in alvos), [serializar_ficha(f) for f in alvos])
     for f in alvos:
         db.execute("DELETE FROM fichas WHERE id=?", (f["id"],))
     db.commit()
@@ -782,7 +1042,7 @@ def nome_de_copia(guild_id, original: str) -> str:
 
 @bot.command(name="copiarficha")
 async def copiarficha(ctx, *, raw: str = ""):
-    """copia uma ficha inteira (atributos, nivel, xp, corpo/mente, itens, status e notas)."""
+    """copia uma ficha inteira (atributos, nivel, corpo/mente, itens, status, habilidades e notas)."""
     dono = ctx.author
     if ctx.message.mentions:
         dono = ctx.message.mentions[0]
@@ -811,7 +1071,7 @@ async def copiarficha(ctx, *, raw: str = ""):
         if len(fichas_do_usuario(ctx.guild.id, dono.id)) >= limite:
             await ctx.send(f"voce ja tem {limite} ficha(s), o maximo permitido para voce.")
             return
-    cols = ["nivel", "xp"] + list(ATRIBUTOS) + ["corpo", "mente"]
+    cols = ["nivel"] + list(ATRIBUTOS) + ["corpo", "mente"]
     cur = db.execute(
         f"INSERT INTO fichas (guild_id, dono_id, nome, ordem, {', '.join(cols)}) "
         f"VALUES (?, ?, ?, 999999, {', '.join('?' for _ in cols)})",
@@ -913,7 +1173,7 @@ async def limitepadrao(ctx, *, raw: str = ""):
 
 
 # ----------------------------------------------------------------------------
-# atributos, nivel e xp
+# atributos e nivel
 # ----------------------------------------------------------------------------
 @bot.command(name="mudar")
 async def mudar(ctx, *, raw: str = ""):
@@ -944,8 +1204,8 @@ async def mudar(ctx, *, raw: str = ""):
         if c in ("vigor", "vgr", "vontade", "vtd"):
             erros.append(f"**{campo_txt}**: vigor e vontade sao calculados (60 + res / 60 + sab) e nao podem ser mudados.")
             continue
-        if c in ("nivel", "xp"):
-            erros.append(f"**{campo_txt}**: para nivel e experiencia use `!nivel` e `!xp`.")
+        if c == "nivel":
+            erros.append(f"**{campo_txt}**: para o nivel use `!nivel`.")
             continue
         campo = achar_attr(c) or VITAIS.get(c)
         pv = parse_valor(val_txt)
@@ -1044,29 +1304,6 @@ async def nivel(ctx, *, raw: str = ""):
     await ctx.send(f"⭐ **{f['nome']}** — nivel: {fmt_nivel(f['nivel'])} → {fmt_nivel(novo)} ({pontos})")
 
 
-@bot.command(name="xp")
-async def xp(ctx, *, raw: str = ""):
-    f, resto = await resolver(ctx, tokenizar(raw), numero_e_valor=True, aridades={0, 1})
-    if not f:
-        return
-    if not resto:
-        await ctx.send(f"**{f['nome']}** tem {f['xp']} de xp.")
-        return
-    if not await checar_edicao(ctx, f):
-        return
-    pv = parse_valor(resto[0][0]) if len(resto) == 1 else None
-    if pv is None:
-        await ctx.send("uso: `!xp [personagem] [valor ou +n/-n]`")
-        return
-    novo = max(0, min(aplicar_valor(f["xp"], pv), 10**9))
-    db.execute("UPDATE fichas SET xp=? WHERE id=?", (novo, f["id"]))
-    db.commit()
-    await ctx.send(f"✨ **{f['nome']}** — xp: {f['xp']} → {novo}")
-
-
-# ----------------------------------------------------------------------------
-# vida e dados
-# ----------------------------------------------------------------------------
 @bot.command(name="vida")
 async def vida(ctx, *, raw: str = ""):
     f, _ = await resolver(ctx, tokenizar(raw), sem_resto=True, aridades={0})
@@ -1124,13 +1361,15 @@ async def d20(ctx, *, raw: str = ""):
     if len(tokens) >= 3 and achar_attr(tokens[-1][0]) and not achar_attr(tokens[1][0]):
         await briga_de_rolagem(ctx, tokens)
         return
-    f, resto = await resolver(ctx, tokens, editar=True, aridades={1, 2})
+    f, resto = await resolver(ctx, tokens, aridades={1, 2})
     if not f:
         return
     attr = achar_attr(resto[0][0]) if len(resto) in (1, 2) else None
     if not attr:
         await ctx.send("uso: `!d20` (puro) • `!d20 [personagem] [sigla] [habilidade opcional]` • "
                        "briga: `!d20 [pers1] [pers2] [sigla]`  ex.: `!d20 com`, `!d20 agi cortelinear`, `!d20 douma kage pre`")
+        return
+    if not await checar_edicao(ctx, f):
         return
     extra, nome_hab, nota = 0, None, ""
     if len(resto) == 2:
@@ -1240,6 +1479,7 @@ async def dano(ctx, *, raw: str = ""):
             novo = max(0, antes - pontos)
             db.execute(f"UPDATE fichas SET {campo}=? WHERE id=?", (novo, alvo["id"]))
             db.commit()
+            registrar_alvo(ctx, alvo)
             texto += f"\n**{alvo['nome']}** — {SIG[campo]}: {antes} → {novo}"
             if novo == 0:
                 texto += ("\n💀 corpo em 0: desmaiado ou morto, conforme o contexto." if campo == "corpo"
@@ -1413,7 +1653,7 @@ async def descartar(ctx, *, raw: str = ""):
     if len(resto) not in (1, 2):
         await ctx.send("uso: `!descartar [personagem] [item] [quantidade opcional]`")
         return
-    item = get_item(f["id"], resto[0][0])
+    item = get_item(f["id"], resto[0][0], seguro=True)
     if not item:
         await ctx.send(msg_nao_tem(f, "item", resto[0][0]))
         return
@@ -1664,7 +1904,7 @@ async def rmstatus(ctx, *, raw: str = ""):
             await ctx.send(f"qual status remover? ativos: {nomes}. uso: `!rmstatus [personagem] [status]`")
             return
     else:
-        alvo = get_status(f["id"], resto[0][0])
+        alvo = get_status(f["id"], resto[0][0], seguro=True)
         if not alvo:
             await ctx.send(msg_nao_tem(f, "status", resto[0][0]))
             return
@@ -1739,6 +1979,8 @@ async def turno(ctx, *, raw: str = ""):
             return
     if not alvos:
         return
+    for f in alvos:
+        registrar_alvo(ctx, f)
     blocos = [f"**⏭️ {f['nome']}**\n" + "\n".join(processar_turno(f)) for f in alvos]
     await enviar_longo(ctx, "\n\n".join(blocos))
 
@@ -1820,7 +2062,7 @@ async def apagar(ctx, *, raw: str = ""):
     if len(resto) != 1:
         await ctx.send("uso: `!apagar [personagem] [nome da nota]`")
         return
-    nota = get_nota(f["id"], resto[0][0])
+    nota = get_nota(f["id"], resto[0][0], seguro=True)
     if not nota:
         await ctx.send(msg_nao_tem(f, "nota", resto[0][0]))
         return
@@ -1878,6 +2120,10 @@ async def limpar(ctx, *, raw: str = ""):
         return
     if not await confirmar(ctx, f"apagar todos os {qtd} item(ns) de **{f['nome']}**?"):
         return
+    itens = [{k: r[k] for k in ("nome", "quantidade", "bonus", "equipado", "tipo")}
+             for r in db.execute("SELECT * FROM itens WHERE ficha_id=?", (f["id"],))]
+    guardar_lixeira(ctx, "itens", f"{qtd} item(ns) de {f['nome']}",
+                    {"ficha_id": f["id"], "ficha_nome": f["nome"], "itens": itens})
     db.execute("DELETE FROM itens WHERE ficha_id=?", (f["id"],))
     db.commit()
     normalizar_vitais(f["id"])
@@ -1895,6 +2141,10 @@ async def queimar(ctx, *, raw: str = ""):
         return
     if not await confirmar(ctx, f"apagar todas as {qtd} anotacao(oes) de **{f['nome']}**?"):
         return
+    notas_apagadas = [{k: r[k] for k in ("titulo", "texto")}
+                      for r in db.execute("SELECT * FROM notas WHERE ficha_id=?", (f["id"],))]
+    guardar_lixeira(ctx, "notas", f"{qtd} anotacao(oes) de {f['nome']}",
+                    {"ficha_id": f["id"], "ficha_nome": f["nome"], "notas": notas_apagadas})
     db.execute("DELETE FROM notas WHERE ficha_id=?", (f["id"],))
     db.commit()
     await ctx.send(f"🔥 {qtd} anotacao(oes) de **{f['nome']}** queimada(s).")
@@ -1916,6 +2166,7 @@ async def matar(ctx, *, raw: str = ""):
     de_quem = "suas" if alvo.id == ctx.author.id else f"de <@{alvo.id}>"
     if not await confirmar(ctx, f"apagar todas as {len(rows)} ficha(s) {de_quem} ({nomes}) com itens, status, habilidades e notas?"):
         return
+    guardar_lixeira(ctx, "fichas", ", ".join(r["nome"] for r in rows), [serializar_ficha(r) for r in rows])
     db.execute("DELETE FROM fichas WHERE guild_id=? AND dono_id=?", (ctx.guild.id, alvo.id))
     db.commit()
     await ctx.send(f"💀 {len(rows)} ficha(s) apagada(s).")
@@ -2086,7 +2337,7 @@ async def apagarhabilidade(ctx, *, raw: str = ""):
     if len(resto) != 1:
         await ctx.send("uso: `!apagarhabilidade [personagem] [habilidade]`")
         return
-    hab = get_habilidade(f["id"], resto[0][0])
+    hab = get_habilidade(f["id"], resto[0][0], seguro=True)
     if not hab:
         await ctx.send(msg_nao_tem(f, "habilidade", resto[0][0]))
         return
@@ -2133,6 +2384,128 @@ async def renomearhabilidade(ctx, *, raw: str = ""):
 
 
 # ----------------------------------------------------------------------------
+# restaurar exclusoes e historico
+# ----------------------------------------------------------------------------
+def descrever_lixeira(r) -> str:
+    return f"#{r['id']} {r['descricao']} — <@{r['user_id']}> <t:{r['criado_em']}:R>"
+
+
+@bot.command(name="restaurar")
+async def restaurar(ctx, *, raw: str = ""):
+    limpar_lixeira()
+    if eh_admin(ctx):
+        rows = db.execute("SELECT * FROM lixeira WHERE guild_id=? ORDER BY id DESC", (ctx.guild.id,)).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM lixeira WHERE guild_id=? AND user_id=? ORDER BY id DESC",
+                          (ctx.guild.id, ctx.author.id)).fetchall()
+    if not rows:
+        await ctx.send("nada para restaurar. as exclusoes ficam guardadas por 30 minutos.")
+        return
+    arg = raw.strip().lstrip("#").strip()
+    if norm(arg) in ("lista", "ls"):
+        await enviar_longo(ctx, "♻️ **da para restaurar** (ate 30 minutos depois de apagar):\n"
+                           + "\n".join(descrever_lixeira(r) for r in rows)
+                           + "\nuse `!restaurar` (o mais recente) ou `!restaurar [numero]`.")
+        return
+    if arg:
+        escolhida = next((r for r in rows if str(r["id"]) == arg), None)
+        if not escolhida:
+            await ctx.send("nao achei essa exclusao. veja `!restaurar lista`.")
+            return
+    else:
+        escolhida = rows[0]
+    dados = json.loads(escolhida["dados"])
+    gid = ctx.guild.id
+
+    if escolhida["tipo"] == "fichas":
+        nomes, donos = [], set()
+        for d in dados:
+            nome = d["nome"]
+            if get_ficha(gid, nome, exato=True):
+                base, n = nome[:18], 1
+                nome = f"{base} (restaurada)"
+                while get_ficha(gid, nome, exato=True):
+                    n += 1
+                    nome = f"{base} (restaurada {n})"
+            cols = [k for k in d if k not in ("itens", "status", "notas", "habilidades")]
+            valores = [nome if k == "nome" else (999999 if k == "ordem" else d[k]) for k in cols]
+            cur = db.execute(f"INSERT INTO fichas ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})", valores)
+            novo_id = cur.lastrowid
+            for r in d["itens"]:
+                db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo) VALUES (?, ?, ?, ?, ?, ?)",
+                           (novo_id, r["nome"], r["quantidade"], r["bonus"], r["equipado"], r["tipo"]))
+            for r in d["status"]:
+                db.execute("INSERT INTO status (ficha_id, nome, tipo, bonus, duracao) VALUES (?, ?, ?, ?, ?)",
+                           (novo_id, r["nome"], r["tipo"], r["bonus"], r["duracao"]))
+            for r in d["notas"]:
+                db.execute("INSERT INTO notas (ficha_id, titulo, texto) VALUES (?, ?, ?)", (novo_id, r["titulo"], r["texto"]))
+            for r in d["habilidades"]:
+                db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao) VALUES (?, ?, ?, ?)",
+                           (novo_id, r["nome"], r["bonus"], r["duracao"]))
+            nomes.append(nome)
+            donos.add(d["dono_id"])
+        db.commit()
+        for dono in donos:
+            renumerar(gid, dono)
+        for nome in nomes:
+            restaurada = get_ficha(gid, nome, exato=True)
+            if restaurada:
+                normalizar_vitais(restaurada["id"])
+        resumo = f"{len(nomes)} ficha(s): " + ", ".join(f"**{n}**" for n in nomes)
+    else:
+        f = get_ficha_id(dados["ficha_id"]) or get_ficha(gid, dados["ficha_nome"], exato=True)
+        if not f:
+            await ctx.send(f"a ficha **{dados['ficha_nome']}** nao existe mais. restaure a ficha primeiro, se ainda der.")
+            return
+        feitos = pulados = 0
+        if escolhida["tipo"] == "itens":
+            for r in dados["itens"]:
+                if get_item(f["id"], r["nome"], exato=True):
+                    pulados += 1
+                    continue
+                db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo) VALUES (?, ?, ?, ?, ?, ?)",
+                           (f["id"], r["nome"], r["quantidade"], r["bonus"], r["equipado"], r["tipo"]))
+                feitos += 1
+            rotulo = "item(ns)"
+        else:
+            for r in dados["notas"]:
+                if get_nota(f["id"], r["titulo"], exato=True):
+                    pulados += 1
+                    continue
+                db.execute("INSERT INTO notas (ficha_id, titulo, texto) VALUES (?, ?, ?)", (f["id"], r["titulo"], r["texto"]))
+                feitos += 1
+            rotulo = "anotacao(oes)"
+        db.commit()
+        normalizar_vitais(f["id"])
+        resumo = f"{feitos} {rotulo} de **{f['nome']}**" + (f" ({pulados} ja existia(m) e foi(ram) mantido(s))" if pulados else "")
+    db.execute("DELETE FROM lixeira WHERE id=?", (escolhida["id"],))
+    db.commit()
+    await ctx.send(f"♻️ restaurado: {resumo}.")
+
+
+@bot.command(name="historico")
+async def historico(ctx, *, raw: str = ""):
+    f, resto = await resolver(ctx, tokenizar(raw), numero_e_valor=True, aridades={0, 1})
+    if not f:
+        return
+    if not pode_editar(ctx, f):
+        await ctx.send("🚫 so o dono da ficha ou um admin ve o historico.")
+        return
+    qtd = 10
+    if resto:
+        if len(resto) != 1 or not resto[0][0].isdigit() or not 1 <= int(resto[0][0]) <= 25:
+            await ctx.send("uso: `!historico [personagem] [quantidade de 1 a 25]`")
+            return
+        qtd = int(resto[0][0])
+    rows = db.execute("SELECT * FROM historico WHERE ficha_id=? ORDER BY id DESC LIMIT ?", (f["id"], qtd)).fetchall()
+    if not rows:
+        await ctx.send(f"ainda nao ha alteracoes registradas em **{f['nome']}**.")
+        return
+    linhas = [f"• <t:{r['criado_em']}:f> <@{r['user_id']}> — `{r['texto'].replace(chr(96), chr(39))}`" for r in rows]
+    await enviar_longo(ctx, f"🕘 **historico de {f['nome']}** (ultimas {len(rows)} alteracoes)\n" + "\n".join(linhas))
+
+
+# ----------------------------------------------------------------------------
 # inicio
 # ----------------------------------------------------------------------------
 def carregar_token() -> str:
@@ -2153,4 +2526,5 @@ if __name__ == "__main__":
     # corrige corpo/mente que tenham ficado acima do maximo calculado so com atributos base
     for _r in db.execute("SELECT id FROM fichas").fetchall():
         normalizar_vitais(_r["id"])
+    fazer_backup()
     bot.run(carregar_token())
