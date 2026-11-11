@@ -89,6 +89,8 @@ TIPOS_HABILIDADE = {
     "penalidade": "debuff",
     "pen": "debuff",
     "debuff": "debuff",
+    "shikigami": "shikigami",
+    "mental": "mental",
 }
 MODOS_ATAQUE = {
     "perto": ("combate", "forca"),
@@ -103,7 +105,16 @@ def nome_tipo_item(tipo: str) -> str:
 
 
 def nome_tipo_habilidade(modo: str) -> str:
-    return {"buff": "melhoria (mel)", "debuff": "penalidade (pen)"}.get(modo, modo)
+    return {
+        "buff": "melhoria (mel)",
+        "debuff": "penalidade (pen)",
+        "shikigami": "invocação (shikigami)",
+        "mental": "ataque mental",
+    }.get(modo, modo)
+
+
+def texto_modos_dano(modos) -> str:
+    return ", ".join(modo.title() for modo in modos) if modos else "todos os tipos"
 
 
 def validar_efeitos_habilidade(efeitos, nome: str) -> list:
@@ -228,6 +239,7 @@ CREATE TABLE IF NOT EXISTS habilidades (
     ativa INTEGER NOT NULL DEFAULT 0,
     restam INTEGER,
     modo TEXT NOT NULL DEFAULT 'buff',
+    invocacao TEXT,
     custos TEXT NOT NULL DEFAULT '{}',
     efeitos TEXT NOT NULL DEFAULT '[]',
     UNIQUE (ficha_id, nome)
@@ -267,6 +279,12 @@ CREATE TABLE IF NOT EXISTS ranking (
     dungeons INTEGER NOT NULL DEFAULT 0,
     vitorias INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS dungeon_ativas (
+    canal_id INTEGER NOT NULL,
+    ficha_id INTEGER NOT NULL REFERENCES fichas(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (canal_id, ficha_id)
 );
 """
 
@@ -311,6 +329,7 @@ def preparar_banco():
         ("habilidades", "requisitos", "TEXT NOT NULL DEFAULT '{}'"),
         ("habilidades", "custos", "TEXT NOT NULL DEFAULT '{}'"),
         ("habilidades", "efeitos", "TEXT NOT NULL DEFAULT '[]'"),
+        ("habilidades", "invocacao", "TEXT"),
     ):
         garantir_coluna(tabela, coluna, definicao)
 
@@ -1013,6 +1032,10 @@ async def backup_periodico():
 @bot.event
 async def on_ready():
     print(f"conectado como {bot.user} (id {bot.user.id})")
+    global DUNGEONS_REINICIO_VERIFICADO
+    if not DUNGEONS_REINICIO_VERIFICADO:
+        DUNGEONS_REINICIO_VERIFICADO = True
+        await encerrar_dungeons_interrompidas()
     if not backup_periodico.is_running():
         backup_periodico.start()
     if not limpar_dungeons.is_running():
@@ -1151,7 +1174,7 @@ AJUDA = [
     ("status", "renomearstatus", "!renomearstatus [pers] [nome] [novo nome]", "troca o nome do status", ""),
     ("habilidades", "ch", "!ch [pers] [nome] [+sigla,-sigla] [valores] [persistente|turnos]", "cria habilidade; sem duracao vale so o turno atual; crp/mnt tem efeito imediato ao usar; valores aceitam % (+crp 50% = metade do vigor; +for 20% = 20% do atributo); int causa dano fisico", "!ch Kage CorteLinear +for,+agi 2,5"),
     ("habilidades", "habilidades", "!habilidades [pers]", "lista as habilidades e quais estao ativas; habilidades da loja sao aprendidas com !comprar", ""),
-    ("habilidades", "usarh", "!usarh [pers] [habilidade] [alvo opcional]", "ativa a habilidade; na dungeon, o alvo aceita o nome completo ou o comeco do nome, ignorando maiusculas e acentos; melhoria (mel) mira aliado e penalidade (pen) inimigo", "!usarh Foco de Batalha dou"),
+    ("habilidades", "usarh", "!usarh [pers] [habilidade] [alvo opcional]", "ativa a habilidade; na dungeon, habilidades mentais disputam int contra sab e reduzem mente; melhorias miram aliados, penalidades e habilidades mentais miram inimigos, e shikigami invocam aliados", "!usarh Invasão Mental 2"),
     ("habilidades", "desativarh", "!desativarh [pers] [habilidade]", "desativa uma habilidade ativa", ""),
     ("habilidades", "apagarh", "!apagarh [pers] [habilidade]", "apaga a habilidade; exige o nome ou pelo menos 3 letras do comeco", ""),
     ("habilidades", "renomearh", "!renomearh [pers] [habilidade] [novo nome]", "troca o nome da habilidade", ""),
@@ -1163,7 +1186,7 @@ AJUDA = [
     ("notas", "queimar", "!queimar [pers]", "apaga todas as notas (pede confirmacao; da para desfazer)", ""),
     ("xp", "xp", "!xp [pers]", "mostra o nivel e o xp da ficha; xp vem das dungeons e cada nivel pede 100 x nivel de xp (ficha em nivel livre nao usa xp)", "!xp kage"),
     ("xp", "upar", "!upar [pers] [quantidade]", "admin: da (ou tira, com -) xp a uma ficha; sobe de nivel sozinho", "!upar kage 150"),
-    ("dungeon", "dungeon", "!dungeon", "mostra dificuldades, temas e comandos; corpo em 0 ou todo o grupo desmaiado causa morte permanente", ""),
+    ("dungeon", "dungeon", "!dungeon", "mostra dificuldades, temas e comandos; corpo em 0 ou todos os jogadores desmaiados causa morte permanente, mesmo com shikigami ativo; sem participação no andar, sem recompensa", ""),
     ("dungeon", "dungeon criar", "!dungeon criar [facil|medio|dificil|pesadelo] [caverna|cripta|floresta|ruinas] [ficha]", "abre uma dungeon no canal; niveis sugeridos: facil 1-5, medio 6-10, dificil 11-15, pesadelo 16-20. qualquer ficha pode entrar em qualquer uma; inimigos acompanham o nivel medio do grupo; pede confirmacao por causa da morte permanente", "!dungeon criar dificil cripta kage"),
     ("dungeon", "dungeon entrar", "!dungeon entrar [ficha]", "entra no grupo antes do inicio (ate 4 jogadores, uma ficha por pessoa; qualquer nivel pode entrar em qualquer dificuldade)", "!dungeon entrar douma"),
     ("dungeon", "dungeon iniciar", "!dungeon iniciar", "o lider comeca a dungeon (pode ser solo)", ""),
@@ -1173,7 +1196,8 @@ AJUDA = [
     ("dungeon", "dungeon ranking", "!dungeon ranking", "ranking da dungeon atual: abates, dano e acertos de cada um; no fim o mvp ganha moedas extras", ""),
     ("dungeon", "escolher", "!escolher [numero ou opcao]", "em eventos de grupo, todos votam e o efeito atinge o grupo; em eventos individuais, apenas o explorador indicado escolhe e recebe o efeito", "!escolher examinar"),
     ("dungeon", "ranking", "!ranking [abates|mvp|dano|vitorias]", "ranking do servidor somando todas as dungeons", "!ranking mvp"),
-    ("dungeon", "atacar", "!atacar [alvo] [tipo ou habilidade]", "Informe o tipo do ataque (perto, longe, magia ou jujutsu) ou o nome de uma habilidade de ataque para usar o tipo dela automaticamente. Perto: combate+for; longe: precisao+for+metade da int; magia: precisao+int; jujutsu: combate+for+metade da int. Metade da int arredonda para baixo e todo dano tira corpo.", "!atacar 2 Punho de Ruptura"),
+    ("dungeon", "atacar", "!atacar [alvo] [tipo ou habilidade]", "Use ataques perto, longe, magia ou jujutsu; habilidades mentais, melhorias, penalidades e invocações são usadas somente com !usarh. No turno de um shikigami controlável, o invocador escolhe o alvo e pode usar uma técnica. Perto: combate+for; longe: precisão+for+metade da int; magia: precisão+int; jujutsu: combate+for+metade da int. Metade da int arredonda para baixo e esses ataques tiram corpo.", "!atacar 2 Punho de Ruptura"),
+    ("dungeon", "observar", "!observar [inimigo]", "gasta o turno para observar um inimigo com d20 + sabedoria; resultado 12+ revela ataques e seus tipos, 18+ também revela os atributos mais fortes e as vulnerabilidades. Corpo e mente permanecem públicos.", "!observar 2"),
     ("dungeon", "usar", "!usar [consumível] [alvo aliado opcional]", "gasta a vez usando um consumível da sua ficha; pode aplicar em qualquer aliado do grupo", "!usar \"Poção de Cura\" Douma"),
     ("dungeon", "descansar", "!descansar [crp|mnt]", "em combate gasta a vez e recupera vigor/20 (ou vontade/20); no acampamento recupera 20%, uma vez por pessoa", "!descansar mnt"),
     ("dungeon", "fugir", "!fugir", "foge so da batalha (a dungeon continua): rola agilidade contra o inimigo mais agil e so falha se perder por mais de 4; "
@@ -1480,8 +1504,8 @@ async def copiarficha(ctx, *, raw: str = ""):
     db.execute("INSERT INTO notas (ficha_id, titulo, texto) "
                "SELECT ?, titulo, texto FROM notas WHERE ficha_id=?", (novo_id, f["id"]))
     db.execute("INSERT INTO habilidades "
-               "(ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos) "
-               "SELECT ?, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos "
+               "(ficha_id, nome, bonus, duracao, ativa, restam, modo, invocacao, mental, requisitos, custos, efeitos) "
+               "SELECT ?, nome, bonus, duracao, ativa, restam, modo, invocacao, mental, requisitos, custos, efeitos "
                "FROM habilidades WHERE ficha_id=?",
                (novo_id, f["id"]))
     db.commit()
@@ -1770,6 +1794,9 @@ def ficha_por_token(ctx, t):
 async def rolar_habilidade(ctx, f, hab, attr):
     """rola o valor proprio da habilidade num atributo: d20 + valor da habilidade
     (porcentagem = % do atributo base da ficha). nao soma bonus de itens/status."""
+    if hab["modo"] == "mental":
+        await ctx.send(f"**{hab['nome']}** só pode ser usada com `!usarh` durante o combate de uma Dungeon.")
+        return
     if not await checar_edicao(ctx, f):
         return
     bonus_hab = json.loads(hab["bonus"])
@@ -1826,6 +1853,9 @@ async def d20(ctx, *, raw: str = ""):
         if not hab:
             await ctx.send(msg_nao_tem(f, "habilidade", resto[0][0]))
             return
+        if hab["modo"] == "mental":
+            await ctx.send(f"**{hab['nome']}** só pode ser usada com `!usarh` durante o combate de uma Dungeon.")
+            return
         await rolar_habilidade(ctx, f, hab, achar_attr(resto[1][0]))
         return
     attr = achar_attr(resto[0][0]) if len(resto) in (1, 2) else None
@@ -1842,6 +1872,9 @@ async def d20(ctx, *, raw: str = ""):
         hab = get_habilidade(f["id"], resto[1][0])
         if not hab:
             await ctx.send(msg_nao_tem(f, "habilidade", resto[1][0]))
+            return
+        if hab["modo"] == "mental":
+            await ctx.send(f"**{hab['nome']}** só pode ser usada com `!usarh` durante o combate de uma Dungeon.")
             return
         nome_hab = hab["nome"]
         bonus_hab = valor_bonus(json.loads(hab["bonus"]).get(attr, 0), f[attr])
@@ -2485,8 +2518,14 @@ def texto_loja(secao: str) -> str:
             "Aprenda com `!comprar [personagem] [habilidade]` (uma por compra).",
         ]
         if HABILIDADES_LOJA:
-            for habilidade in HABILIDADES_LOJA:
+            comuns = [habilidade for habilidade in HABILIDADES_LOJA if habilidade["modo"] != "shikigami"]
+            invocacoes = [habilidade for habilidade in HABILIDADES_LOJA if habilidade["modo"] == "shikigami"]
+            for habilidade in comuns:
                 linhas.append(f"• **{habilidade['nome']}** — {habilidade['preco']} 💰")
+            if invocacoes:
+                linhas += ["", "**Shikigami**"]
+                for habilidade in invocacoes:
+                    linhas.append(f"• **{habilidade['nome']}** — {habilidade['preco']} 💰")
         else:
             linhas.append("• Nenhuma habilidade disponível no momento.")
         linhas.append("Veja efeitos, custos e requisitos com `!info [habilidade]`.")
@@ -2527,17 +2566,57 @@ async def info_loja(ctx, *, raw: str = ""):
     if alvo["categoria"] == "habilidade":
         custos = alvo.get("custos", {})
         requisitos = alvo.get("requisitos", {})
-        linhas = [
-            f"📖 **{alvo['nome']}** · habilidade",
-            alvo.get("descricao") or "Habilidade com o efeito indicado abaixo.",
-            f"Efeito: {fmt_bonus(alvo['bonus'])} · duração: "
-            f"{fmt_duracao_hab(alvo['bonus'], alvo['duracao'])}",
-            f"Tipo: {nome_tipo_habilidade(alvo['modo'])} · preço: {alvo['preco']} 💰",
-        ]
+        linhas = [f"📖 **{alvo['nome']}** · habilidade"]
+        if alvo["modo"] == "shikigami":
+            perfil = perfil_shikigami(alvo["invocacao"])
+            escala_usuario = any(
+                peso_int or peso_sab
+                for base, peso_int, peso_sab, divisor in perfil["atributos"].values()
+            )
+            ficha_desc = ("atributos calculados por inteligência e sabedoria do invocador"
+                          if escala_usuario else "atributos fixos")
+            linhas += [
+                perfil["descricao"],
+                f"Ficha: {ficha_desc}; corpo e mente são definidos ao invocar.",
+                f"Autonomia: {texto_autonomia_shikigami(perfil['independencia'])}.",
+                f"Ataque: **{perfil['ataque']['nome']}** ({perfil['ataque']['modo']}).",
+                "Duração: até o fim da Dungeon ou até ser derrotado.",
+                f"Tipo: {nome_tipo_habilidade(alvo['modo'])} · preço: {alvo['preco']} 💰",
+            ]
+            if perfil.get("modos_dano"):
+                linhas.insert(3, f"Só recebe dano de: {texto_modos_dano(perfil['modos_dano'])}.")
+            especial = perfil["especial"]
+            if especial["tipo"] == "cura":
+                efeito_especial = f"recupera {especial['percentual']}% de {SIG[especial['campo']]}"
+            elif especial["tipo"] == "ataque":
+                efeito_especial = f"ataque {especial['modo']}"
+            else:
+                efeito_especial = (f"{fmt_bonus(especial['atributos'])} por "
+                                   f"{especial['duracao']} turno(s)")
+            linhas.insert(4, f"Técnica especial: **{especial['nome']}** — {efeito_especial}.")
+            if especial.get("efeitos"):
+                linhas.insert(5, "Condições: " + texto_efeitos_condicao(especial["efeitos"]) + ".")
+        elif alvo["modo"] == "mental":
+            bonus = alvo["bonus"].get("inteligencia", 0)
+            linhas += [
+                alvo.get("descricao") or "Ataque que afeta a mente do alvo.",
+                f"Dano mental: disputa d20 + INT (+{bonus}) contra d20 + SAB; "
+                "se vencer por mais de 4, reduz a mente pela diferença acima de 4.",
+                f"Tipo: {nome_tipo_habilidade(alvo['modo'])} (conta como magia para resistências) · "
+                f"preço: {alvo['preco']} 💰",
+                "Uso durante combate: `!usarh [habilidade] [inimigo]`.",
+            ]
+        else:
+            linhas += [
+                alvo.get("descricao") or "Habilidade com o efeito indicado abaixo.",
+                f"Efeito: {fmt_bonus(alvo['bonus'])} · duração: "
+                f"{fmt_duracao_hab(alvo['bonus'], alvo['duracao'])}",
+                f"Tipo: {nome_tipo_habilidade(alvo['modo'])} · preço: {alvo['preco']} 💰",
+            ]
         if custos:
             linhas.append("Custo: " + " · ".join(f"-{valor} {SIG[vital]}" for vital, valor in custos.items()))
         if requisitos:
-            linhas.append("Requisitos: " + " · ".join(
+            linhas.append("Requisitos (todos): " + " e ".join(
                 f"{ATRIBUTOS[atributo]} ≥ {valor}" for atributo, valor in requisitos.items()
             ))
         else:
@@ -2609,10 +2688,11 @@ async def comprar(ctx, *, raw: str = ""):
             if atualizacao.rowcount == 1:
                 db.execute(
                     "INSERT INTO habilidades "
-                    "(ficha_id, nome, bonus, duracao, modo, requisitos, custos, efeitos) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(ficha_id, nome, bonus, duracao, modo, invocacao, requisitos, custos, efeitos) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (f["id"], habilidade["nome"], json.dumps(habilidade["bonus"]),
-                     habilidade["duracao"], habilidade["modo"], json.dumps(habilidade["requisitos"]),
+                     habilidade["duracao"], habilidade["modo"], habilidade["invocacao"],
+                     json.dumps(habilidade["requisitos"]),
                      json.dumps(habilidade["custos"]), json.dumps(habilidade["efeitos"])),
                 )
                 comprada = True
@@ -3152,7 +3232,8 @@ async def criarhabilidade(ctx, *, raw: str = ""):
     if not 3 <= len(resto) <= 6:
         await ctx.send(
             "uso: `!ch [personagem] [nome] [+sigla,-sigla] [valores] [persistente|turnos] "
-            "[perto|longe|magia|jujutsu|melhoria|mel|penalidade|pen] [condicao:intensidade:turnos[:chance]]`\n"
+            "[perto|longe|magia|jujutsu|mental|melhoria|mel|penalidade|pen] "
+            "[condicao:intensidade:turnos[:chance]]`\n"
             "ex.: `!ch Kage CorteLinear +for,+agi 2,5 perto`\n"
             "ex.: `!ch Kage ArtesMarciais +for 5 persistente mel`\n"
             "ex.: `!ch Kage Furia +for 3 4` (dura 4 turnos)\n"
@@ -3174,6 +3255,9 @@ async def criarhabilidade(ctx, *, raw: str = ""):
     extras = [t for t, _ in resto[3:]]
     efeitos = []
     for extra in extras:
+        if norm(extra) == "shikigami":
+            await ctx.send("shikigami só podem ser aprendidos na loja com `!comprar`.")
+            return
         if norm(extra) in TIPOS_HABILIDADE:
             modo = TIPOS_HABILIDADE[norm(extra)]
         else:
@@ -3188,9 +3272,12 @@ async def criarhabilidade(ctx, *, raw: str = ""):
                 duracao, ok = parse_duracao(extra)
                 if not ok:
                     await ctx.send(f"nao entendi **{extra}**. informe uma duracao, um tipo (`perto`, `longe`, "
-                                   "`magia`, `jujutsu`, `mel`, `pen`) ou condicao no formato "
+                                   "`magia`, `jujutsu`, `mental`, `mel`, `pen`) ou condicao no formato "
                                    "`veneno:3:2`.")
                     return
+    if modo == "mental" and (set(bonus) != {"inteligencia"} or efeitos):
+        await ctx.send("habilidades mentais devem ter apenas bonus de inteligência e não podem aplicar condições.")
+        return
     if get_habilidade(f["id"], nome, exato=True):
         await ctx.send(f"**{f['nome']}** ja tem a habilidade **{nome}**. "
                        "para trocar, apague com `!apagarh` e crie de novo.")
@@ -3198,7 +3285,9 @@ async def criarhabilidade(ctx, *, raw: str = ""):
     db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao, modo, efeitos) VALUES (?, ?, ?, ?, ?, ?)",
                (f["id"], nome, json.dumps(bonus), duracao, modo, json.dumps(efeitos)))
     db.commit()
-    if all(k in ("corpo", "mente") for k in bonus):
+    if modo == "mental":
+        dica = "use `!usarh` durante o combate de uma Dungeon para disputar dano mental."
+    elif all(k in ("corpo", "mente") for k in bonus):
         dica = "use `!usarh` para aplicar o efeito."
     else:
         dica = "use `!usarh` para ativar, ou `!d20 [sigla] [habilidade]` para somar so naquela rolagem."
@@ -3219,6 +3308,22 @@ async def habilidades(ctx, *, raw: str = ""):
         return
     linhas = []
     for r in rows:
+        if r["modo"] == "shikigami":
+            run = run_da_ficha(f["id"])
+            invocado = next((
+                shiki for shiki in (run or {}).get("shikigami", {}).values()
+                if norm(shiki["invocacao"]) == norm(r["invocacao"]) and shiki["corpo"] > 0
+            ), None)
+            perfil = perfil_shikigami(r["invocacao"])
+            estado = f"invocado por {invocado['owner_nome']}" if invocado else "não invocado"
+            texto = (
+                f"{'🪬' if invocado else '⚪'} **{r['nome']}** · {estado}\n"
+                f"   {perfil['descricao']}\n"
+                f"   Autonomia: {texto_autonomia_shikigami(perfil['independencia'])} · "
+                "duração: até o fim da Dungeon ou ser derrotado."
+            )
+            linhas.append(texto)
+            continue
         estado = "ativa" if r["ativa"] else "inativa"
         texto = (f"{'🟢' if r['ativa'] else '⚪'} **{r['nome']}** · {estado}\n"
                  f"   Tipo: {nome_tipo_habilidade(r['modo'])} · "
@@ -3269,9 +3374,13 @@ def ativar_habilidade(f, hab) -> list:
 
 def validar_uso_habilidade(f, hab):
     requisitos = json.loads(hab["requisitos"] or "{}")
-    for atributo, minimo in requisitos.items():
-        if f[atributo] < minimo:
-            return f"requer **{ATRIBUTOS[atributo]} {minimo}** (voce tem {f[atributo]})."
+    insuficientes = [
+        f"{ATRIBUTOS[atributo]} ≥ {minimo} (tem {f[atributo]})"
+        for atributo, minimo in requisitos.items()
+        if f[atributo] < minimo
+    ]
+    if insuficientes:
+        return "requisito(s) nao atendido(s): " + " e ".join(insuficientes) + "."
 
     custos = json.loads(hab["custos"] or "{}")
     for vital, custo in custos.items():
@@ -3362,6 +3471,34 @@ async def usarhabilidade(ctx, *, raw: str = ""):
             fid = await validar_vez(ctx, run)
             if fid is None:
                 return
+            shiki = shikigami_da_vez(run)
+            if shiki:
+                tecnica_txt, alvo_ref = separar_alvo_dungeon(run, raw)
+                if alvo_ref and alvo_ref[0] == "a":
+                    await ctx.send("alvo ambiguo: " + ", ".join(f"**{nome}**" for nome in alvo_ref[1])
+                                   + ". escreva mais do nome.")
+                    return
+                especial = shiki["especial"]
+                achada = achar_nome([{"nome": especial["nome"]}], tecnica_txt.strip().strip(ASPAS).strip())
+                if not achada:
+                    await ctx.send(
+                        f"**{shiki['nome']}** pode usar `!usarh {especial['nome']} [alvo opcional]`."
+                    )
+                    return
+                if especial["tipo"] in ("ataque", "debuff") and (
+                    not alvo_ref or alvo_ref[0] != "m"
+                ):
+                    await ctx.send(f"informe um inimigo para **{especial['nome']}**.")
+                    return
+                if alvo_ref and alvo_ref[0] == "m" and not inimigo_vivo(run["inimigos"][alvo_ref[1]]):
+                    await ctx.send("esse inimigo ja foi derrotado.")
+                    return
+                linhas = usar_especial_shikigami(run, shiki, alvo_ref, ctx)
+                if linhas and linhas[0].startswith(("informe ", "essa técnica", "esse aliado", "esse inimigo")):
+                    await ctx.send("\n".join(linhas))
+                    return
+                await fim_da_acao_shikigami(ctx, run, shiki, linhas)
+                return
             f = get_ficha_id(fid)
             registrar_alvo(ctx, f)
             hab_txt, alvo_ref = separar_alvo_dungeon(run, raw)
@@ -3377,6 +3514,50 @@ async def usarhabilidade(ctx, *, raw: str = ""):
             erro_uso = validar_uso_habilidade(f, hab)
             if erro_uso:
                 await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
+                return
+            if hab["modo"] == "shikigami":
+                if perfil_shikigami(hab["invocacao"]) is None:
+                    await ctx.send(f"**{hab['nome']}** está sem uma ficha de invocação válida; avise um administrador.")
+                    return
+                existente = any(
+                    norm(shiki["invocacao"]) == norm(hab["invocacao"]) and shiki["corpo"] > 0
+                    for shiki in run["shikigami"].values()
+                )
+                if existente:
+                    await ctx.send(f"**{hab['nome']}** já tem uma instância ativa nesta Dungeon.")
+                    return
+                shiki = invocar_shikigami(run, f, hab)
+                if shiki is None:
+                    await ctx.send(f"**{hab['nome']}** já tem uma instância ativa nesta Dungeon.")
+                    return
+                linhas = [
+                    f"🪬 **{f['nome']}** invocou **{shiki['nome']}**.",
+                    f"Ficha: {fmt_bonus(shiki['attrs'])} • {texto_vital_shikigami(shiki)}.",
+                    f"Autonomia: {texto_autonomia_shikigami(shiki['independencia'], f['inteligencia'])}. "
+                    "Dura até o fim da Dungeon ou ser derrotado.",
+                ]
+                if shiki.get("modos_dano"):
+                    linhas.append(f"Só recebe dano de: {texto_modos_dano(shiki['modos_dano'])}.")
+                linhas += pagar_custo_habilidade(f, hab)
+                await fim_da_acao(ctx, run, fid, linhas)
+                return
+            if hab["modo"] == "mental":
+                if not alvo_ref or alvo_ref[0] != "m":
+                    await ctx.send(
+                        f"informe um inimigo para **{hab['nome']}**. "
+                        f"use `!usarh {hab['nome']} [inimigo]`."
+                    )
+                    return
+                alvo = run["inimigos"][alvo_ref[1]]
+                if not inimigo_vivo(alvo):
+                    await ctx.send("esse inimigo já foi derrotado.")
+                    return
+                linhas = acao_ataque_mental(run, f, alvo, hab)
+                if linhas and ("ineficaz" in linhas[0] or "já está sem mente" in linhas[0]):
+                    await ctx.send("\n".join(linhas))
+                    return
+                linhas += pagar_custo_habilidade(f, hab)
+                await fim_da_acao(ctx, run, fid, linhas)
                 return
             if hab["modo"] in ("buff", "debuff"):
                 if alvo_ref is None:
@@ -3432,6 +3613,11 @@ async def usarhabilidade(ctx, *, raw: str = ""):
     hab = get_habilidade(f["id"], resto[0][0])
     if not hab:
         await ctx.send(msg_nao_tem(f, "habilidade", resto[0][0]))
+        return
+    if hab["modo"] in ("shikigami", "mental"):
+        await ctx.send(
+            "shikigami e ataques mentais só podem ser usados durante o combate de uma Dungeon."
+        )
         return
     erro_uso = validar_uso_habilidade(f, hab)
     if erro_uso:
@@ -3565,10 +3751,10 @@ async def restaurar(ctx, *, raw: str = ""):
                 db.execute("INSERT INTO notas (ficha_id, titulo, texto) VALUES (?, ?, ?)", (novo_id, r["titulo"], r["texto"]))
             for r in d["habilidades"]:
                 db.execute("INSERT INTO habilidades "
-                           "(ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           "(ficha_id, nome, bonus, duracao, ativa, restam, modo, invocacao, mental, requisitos, custos, efeitos) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (novo_id, r["nome"], r["bonus"], r["duracao"], r.get("ativa", 0), r.get("restam"),
-                            r.get("modo", "buff"), r.get("mental", 0), r.get("requisitos", "{}"),
+                            r.get("modo", "buff"), r.get("invocacao"), r.get("mental", 0), r.get("requisitos", "{}"),
                             r.get("custos", "{}"), r.get("efeitos", "[]")))
             nomes.append(nome)
             donos.add(d["dono_id"])
@@ -3727,8 +3913,8 @@ async def darxp(ctx, *, raw: str = ""):
 # - qualquer nivel pode entrar em qualquer dificuldade; a dificuldade define a forca dos inimigos e as recompensas
 # - no acampamento podem surgir eventos com pequenas decisoes (baus, armadilhas, altares...)
 # - ranking de abates/dano por dungeon, com mvp no fim; o total vai para o ranking do servidor
-# - forca e inteligencia causam dano fisico ao corpo
-# - o estado das dungeons fica so na memoria: se o bot reiniciar, a dungeon some e as fichas ficam como estao
+# - ataques comuns causam dano ao corpo; ataques mentais reduzem a mente em disputa de int contra sab
+# - combates ficam na memoria; apos reinicio, dungeons interrompidas sao encerradas automaticamente
 MAX_JOGADORES = 4
 INATIVIDADE_DUNGEON = 2 * 60 * 60   # segundos parada ate ser encerrada
 CHANCE_EVENTO = 0.6                 # chance de um evento de decisao aparecer no acampamento
@@ -3774,11 +3960,17 @@ PERSONALIDADES_MONSTRO = {
 }
 
 
-def _m(nome, pesos, *ataques, personalidade="agressivo"):
+def _m(nome, pesos, *ataques, personalidade="agressivo", modos_dano=None):
     """Modelo de inimigo. Ataques: (nome, atributo de acerto, atributo de dano)."""
     if personalidade not in PERSONALIDADES_MONSTRO:
         raise ValueError(f"personalidade de monstro desconhecida: {personalidade}")
-    return {"nome": nome, "pesos": pesos, "ataques": list(ataques), "personalidade": personalidade}
+    if modos_dano is not None and (
+            not modos_dano or any(modo not in MODOS_ATAQUE for modo in modos_dano)):
+        raise ValueError(f"tipos de dano desconhecidos no modelo de inimigo: {nome}")
+    return {
+        "nome": nome, "pesos": pesos, "ataques": list(ataques), "personalidade": personalidade,
+        "modos_dano": list(modos_dano) if modos_dano is not None else None,
+    }
 
 
 TEMAS = {
@@ -3807,14 +3999,15 @@ TEMAS = {
             _m("Zumbi", {"forca": 4, "resistencia": 6, "combate": 2},
                ("pancada podre", "combate", "forca"), personalidade="agressivo"),
             _m("Espectro", {"inteligencia": 5, "precisao": 4, "sabedoria": 3, "agilidade": 2},
-               ("toque gelido", "precisao", "inteligencia"), personalidade="curandeiro"),
+               ("toque gelido", "precisao", "inteligencia"), personalidade="curandeiro",
+               modos_dano=("magia", "jujutsu")),
             _m("Esqueleto Arqueiro", {"precisao": 5, "agilidade": 3, "forca": 2, "resistencia": 2},
                ("flecha ossea", "precisao", "forca"), personalidade="tatico"),
         ],
         "chefe": _m("Lich", {"inteligencia": 6, "sabedoria": 4, "precisao": 5, "resistencia": 2, "combate": 2,
                              "forca": 1},
         ("raio sombrio", "precisao", "inteligencia"), ("mao esqueletica", "combate", "forca"),
-        personalidade="curandeiro"),
+        personalidade="curandeiro", modos_dano=("magia", "jujutsu")),
     },
     "floresta": {
         "nome": "Floresta Sussurrante",
@@ -3948,6 +4141,224 @@ def nome_exibicao_item(nome: str) -> str:
     return catalogo["nome"] if catalogo else nome.title()
 
 
+# Cada fórmula de atributo é (base, peso_inteligencia, peso_sabedoria, divisor).
+SHIKIGAMI = {
+    "Cão de Jade": {
+        "descricao": "Um guardião leal que protege o invocador e luta sob comando.",
+        "independencia": "controlado",
+        "atributos": {
+            "forca": (2, 1, 1, 2), "resistencia": (3, 0, 1, 2), "agilidade": (2, 1, 0, 3),
+            "combate": (2, 1, 1, 2), "inteligencia": (1, 1, 0, 3), "sabedoria": (1, 0, 1, 3),
+            "carisma": (1, 0, 1, 4), "precisao": (1, 0, 1, 3),
+        },
+        "corpo": (18, 1, 1, 3), "mente": (12, 1, 1, 3),
+        "ataque": {"nome": "Mordida de Jade", "modo": "perto", "bonus_acerto": 2, "bonus_dano": 2},
+        "especial": {"nome": "Postura Guardiã", "tipo": "buff", "atributos": {"resistencia": 3}, "duracao": 2},
+    },
+    "Corvo de Tinta": {
+        "descricao": "Um batedor independente que ataca de longe e marca uma presa.",
+        "independencia": "ataque",
+        "modos_dano": ("magia", "jujutsu"),
+        "atributos": {
+            "forca": (2, 0, 0, 1), "resistencia": (2, 0, 0, 1), "agilidade": (6, 0, 0, 1),
+            "combate": (3, 0, 0, 1), "inteligencia": (4, 0, 0, 1), "sabedoria": (3, 0, 0, 1),
+            "carisma": (2, 0, 0, 1), "precisao": (6, 0, 0, 1),
+        },
+        "corpo": (24, 0, 0, 1), "mente": (14, 0, 0, 1),
+        "ataque": {"nome": "Bico de Nanquim", "modo": "longe", "bonus_acerto": 3, "bonus_dano": 1,
+                   "efeitos": [{"tipo": "sangramento", "intensidade": 2, "duracao": 2, "chance": 25}]},
+        "especial": {"nome": "Marca do Batedor", "tipo": "debuff",
+                     "atributos": {"precisao": -2, "resistencia": -1}, "duracao": 2},
+    },
+    "Serpente de Nuvem": {
+        "descricao": "Uma serpente espiritual independente que restaura o corpo de um aliado.",
+        "independencia": "suporte",
+        "atributos": {
+            "forca": (1, 0, 1, 3), "resistencia": (2, 0, 1, 2), "agilidade": (2, 1, 0, 3),
+            "combate": (1, 0, 1, 3), "inteligencia": (2, 1, 0, 2), "sabedoria": (3, 0, 1, 2),
+            "carisma": (2, 0, 1, 3), "precisao": (2, 1, 0, 3),
+        },
+        "corpo": (16, 1, 1, 3), "mente": (20, 1, 2, 3),
+        "ataque": {"nome": "Jato Celeste", "modo": "magia", "bonus_acerto": 2, "bonus_dano": 2},
+        "especial": {"nome": "Orvalho Restaurador", "tipo": "cura", "campo": "corpo", "percentual": 20},
+    },
+    "Raposa do Eclipse": {
+        "descricao": "Uma ilusionista imprevisível que alterna entre ataque e auxílio.",
+        "independencia": "aleatorio",
+        "atributos": {
+            "forca": (1, 1, 0, 3), "resistencia": (2, 0, 1, 3), "agilidade": (4, 1, 0, 3),
+            "combate": (3, 1, 0, 3), "inteligencia": (3, 1, 0, 2), "sabedoria": (2, 0, 1, 3),
+            "carisma": (4, 0, 1, 3), "precisao": (3, 1, 0, 3),
+        },
+        "corpo": (16, 1, 0, 3), "mente": (18, 1, 2, 3),
+        "ataque": {"nome": "Garra Crepuscular", "modo": "jujutsu", "bonus_acerto": 2, "bonus_dano": 2,
+                   "efeitos": [{"tipo": "paralisia", "intensidade": 1, "duracao": 1, "chance": 25}]},
+        "especial": {"nome": "Véu de Ilusão", "tipo": "buff",
+                     "atributos": {"agilidade": 2, "precisao": 2}, "duracao": 1},
+    },
+    "Golem de Basalto": {
+        "descricao": "Um protetor robusto de atributos fixos, controlado pelo invocador.",
+        "independencia": "controlado",
+        "modos_dano": ("perto", "jujutsu"),
+        "atributos": {
+            "forca": (6, 0, 0, 1), "resistencia": (8, 0, 0, 1), "agilidade": (1, 0, 0, 1),
+            "combate": (4, 0, 0, 1), "inteligencia": (1, 0, 0, 1), "sabedoria": (3, 0, 0, 1),
+            "carisma": (1, 0, 0, 1), "precisao": (2, 0, 0, 1),
+        },
+        "corpo": (38, 0, 0, 1), "mente": (12, 0, 0, 1),
+        "ataque": {"nome": "Punho Sísmico", "modo": "perto", "bonus_acerto": 1, "bonus_dano": 4},
+        "especial": {"nome": "Muralha de Pedra", "tipo": "buff", "atributos": {"resistencia": 4}, "duracao": 2},
+    },
+    "Cervo da Aurora": {
+        "descricao": "Um curandeiro independente que recupera a mente de um aliado.",
+        "independencia": "suporte",
+        "atributos": {
+            "forca": (1, 0, 1, 4), "resistencia": (2, 0, 1, 3), "agilidade": (2, 1, 0, 4),
+            "combate": (1, 0, 1, 4), "inteligencia": (2, 1, 0, 3), "sabedoria": (4, 0, 1, 2),
+            "carisma": (3, 0, 1, 3), "precisao": (2, 1, 0, 4),
+        },
+        "corpo": (18, 1, 1, 3), "mente": (22, 1, 2, 3),
+        "ataque": {"nome": "Luz Serena", "modo": "magia", "bonus_acerto": 2, "bonus_dano": 1,
+                   "efeitos": [{"tipo": "queimadura", "intensidade": 2, "duracao": 1, "chance": 20}]},
+        "especial": {"nome": "Sopro da Aurora", "tipo": "cura", "campo": "mente", "percentual": 25},
+    },
+    "Lebre do Trovão": {
+        "descricao": "Uma atacante veloz e independente, especializada em golpes elétricos.",
+        "independencia": "ataque",
+        "atributos": {
+            "forca": (3, 0, 0, 1), "resistencia": (2, 0, 0, 1), "agilidade": (8, 0, 0, 1),
+            "combate": (5, 0, 0, 1), "inteligencia": (2, 0, 0, 1), "sabedoria": (3, 0, 0, 1),
+            "carisma": (3, 0, 0, 1), "precisao": (5, 0, 0, 1),
+        },
+        "corpo": (26, 0, 0, 1), "mente": (14, 0, 0, 1),
+        "ataque": {"nome": "Salto Trovejante", "modo": "perto", "bonus_acerto": 3, "bonus_dano": 2,
+                   "efeitos": [{"tipo": "paralisia", "intensidade": 1, "duracao": 1, "chance": 30}]},
+        "especial": {"nome": "Coice Relâmpago", "tipo": "ataque", "modo": "jujutsu",
+                     "bonus_acerto": 4, "bonus_dano": 2,
+                     "efeitos": [{"tipo": "paralisia", "intensidade": 1, "duracao": 1, "chance": 40}]},
+    },
+    "Aranha do Véu": {
+        "descricao": "Uma caçadora independente que enfraquece e envenena seus alvos.",
+        "independencia": "aleatorio",
+        "atributos": {
+            "forca": (2, 0, 1, 3), "resistencia": (3, 0, 1, 3), "agilidade": (4, 1, 0, 3),
+            "combate": (3, 1, 0, 3), "inteligencia": (3, 1, 0, 2), "sabedoria": (2, 0, 1, 3),
+            "carisma": (1, 0, 1, 4), "precisao": (5, 1, 0, 3),
+        },
+        "corpo": (20, 1, 1, 3), "mente": (16, 1, 1, 3),
+        "ataque": {"nome": "Fio Tóxico", "modo": "longe", "bonus_acerto": 2, "bonus_dano": 1,
+                   "efeitos": [{"tipo": "veneno", "intensidade": 2, "duracao": 2, "chance": 30}]},
+        "especial": {"nome": "Teia Restritiva", "tipo": "debuff",
+                     "atributos": {"agilidade": -3, "combate": -1}, "duracao": 2},
+    },
+    "Tigre de Brasa": {
+        "descricao": "Um atacante feroz que luta sob comando e deixa queimaduras.",
+        "independencia": "controlado",
+        "atributos": {
+            "forca": (3, 1, 1, 2), "resistencia": (2, 0, 1, 3), "agilidade": (3, 1, 0, 3),
+            "combate": (4, 1, 1, 3), "inteligencia": (1, 1, 0, 4), "sabedoria": (1, 0, 1, 4),
+            "carisma": (2, 1, 0, 4), "precisao": (2, 1, 0, 4),
+        },
+        "corpo": (20, 1, 1, 3), "mente": (14, 1, 1, 4),
+        "ataque": {"nome": "Presas Incandescentes", "modo": "perto", "bonus_acerto": 2, "bonus_dano": 3,
+                   "efeitos": [{"tipo": "queimadura", "intensidade": 3, "duracao": 2, "chance": 30}]},
+        "especial": {"nome": "Rugido das Brasas", "tipo": "ataque", "modo": "jujutsu",
+                     "bonus_acerto": 3, "bonus_dano": 3,
+                     "efeitos": [{"tipo": "queimadura", "intensidade": 4, "duracao": 2, "chance": 40}]},
+    },
+    "Guardião do Sino": {
+        "descricao": "Um espírito independente que fortalece aliados ou ataca com ondas sonoras.",
+        "independencia": "aleatorio",
+        "atributos": {
+            "forca": (1, 0, 1, 4), "resistencia": (4, 0, 1, 3), "agilidade": (2, 1, 0, 4),
+            "combate": (2, 0, 1, 3), "inteligencia": (3, 1, 0, 3), "sabedoria": (5, 0, 1, 3),
+            "carisma": (4, 0, 1, 3), "precisao": (3, 1, 0, 3),
+        },
+        "corpo": (22, 1, 1, 3), "mente": (24, 1, 2, 3),
+        "ataque": {"nome": "Badalada Espiritual", "modo": "magia", "bonus_acerto": 2, "bonus_dano": 2,
+                   "efeitos": [{"tipo": "congelamento", "intensidade": 1, "duracao": 1, "chance": 20}]},
+        "especial": {"nome": "Ressonância Protetora", "tipo": "buff",
+                     "atributos": {"resistencia": 2, "sabedoria": 2}, "duracao": 2},
+    },
+    "Oni Escarlate": {
+        "descricao": "Um oni brutal de força devastadora. Só pode ser controlado com INT 18 ou mais; caso contrário, ataca qualquer combatente aleatoriamente.",
+        "independencia": "descontrole",
+        "atributos": {
+            "forca": (12, 0, 0, 1), "resistencia": (10, 0, 0, 1), "agilidade": (6, 0, 0, 1),
+            "combate": (11, 0, 0, 1), "inteligencia": (5, 0, 0, 1), "sabedoria": (4, 0, 0, 1),
+            "carisma": (3, 0, 0, 1), "precisao": (7, 0, 0, 1),
+        },
+        "corpo": (48, 0, 0, 1), "mente": (22, 0, 0, 1),
+        "ataque": {"nome": "Clava da Ruína", "modo": "perto", "bonus_acerto": 5, "bonus_dano": 6,
+                   "efeitos": [{"tipo": "queimadura", "intensidade": 4, "duracao": 2, "chance": 35}]},
+        "especial": {"nome": "Esmagamento Carmesim", "tipo": "ataque", "modo": "jujutsu",
+                     "bonus_acerto": 6, "bonus_dano": 8,
+                     "efeitos": [{"tipo": "queimadura", "intensidade": 6, "duracao": 2, "chance": 50}]},
+    },
+    "Dragão do Abismo": {
+        "descricao": "Um dragão ancestral de poder arcano. Só pode ser controlado com INT 18 ou mais; caso contrário, ataca qualquer combatente aleatoriamente.",
+        "independencia": "descontrole",
+        "atributos": {
+            "forca": (8, 0, 0, 1), "resistencia": (9, 0, 0, 1), "agilidade": (8, 0, 0, 1),
+            "combate": (8, 0, 0, 1), "inteligencia": (12, 0, 0, 1), "sabedoria": (10, 0, 0, 1),
+            "carisma": (8, 0, 0, 1), "precisao": (12, 0, 0, 1),
+        },
+        "corpo": (42, 0, 0, 1), "mente": (35, 0, 0, 1),
+        "ataque": {"nome": "Sopro do Vazio", "modo": "magia", "bonus_acerto": 6, "bonus_dano": 6,
+                   "efeitos": [{"tipo": "veneno", "intensidade": 4, "duracao": 2, "chance": 35}]},
+        "especial": {"nome": "Ruptura Abissal", "tipo": "ataque", "modo": "jujutsu",
+                     "bonus_acerto": 7, "bonus_dano": 8,
+                     "efeitos": [{"tipo": "congelamento", "intensidade": 1, "duracao": 1, "chance": 45}]},
+    },
+    "Quimera Rubra": {
+        "descricao": "Uma fera híbrida veloz e feroz. Só pode ser controlada com INT 18 ou mais; caso contrário, ataca qualquer combatente aleatoriamente.",
+        "independencia": "descontrole",
+        "atributos": {
+            "forca": (10, 0, 0, 1), "resistencia": (8, 0, 0, 1), "agilidade": (12, 0, 0, 1),
+            "combate": (11, 0, 0, 1), "inteligencia": (7, 0, 0, 1), "sabedoria": (7, 0, 0, 1),
+            "carisma": (4, 0, 0, 1), "precisao": (10, 0, 0, 1),
+        },
+        "corpo": (44, 0, 0, 1), "mente": (26, 0, 0, 1),
+        "ataque": {"nome": "Garras da Quimera", "modo": "jujutsu", "bonus_acerto": 5, "bonus_dano": 5,
+                   "efeitos": [{"tipo": "sangramento", "intensidade": 4, "duracao": 2, "chance": 35}]},
+        "especial": {"nome": "Investida Monstruosa", "tipo": "ataque", "modo": "perto",
+                     "bonus_acerto": 7, "bonus_dano": 8,
+                     "efeitos": [{"tipo": "paralisia", "intensidade": 1, "duracao": 1, "chance": 40}]},
+    },
+}
+
+
+def perfil_shikigami(nome: str):
+    if not isinstance(nome, str):
+        return None
+    chave = norm(nome)
+    return next((perfil for nome_perfil, perfil in SHIKIGAMI.items() if norm(nome_perfil) == chave), None)
+
+
+def shikigami_controlavel(shiki: dict) -> bool:
+    if shiki["independencia"] == "controlado":
+        return True
+    if shiki["independencia"] != "descontrole":
+        return False
+    invocador = get_ficha_id(shiki["owner"])
+    return bool(invocador and invocador["inteligencia"] >= 18)
+
+
+def texto_autonomia_shikigami(independencia: str, inteligencia=None) -> str:
+    return {
+        "controlado": "controlado pelo invocador",
+        "ataque": "independente: ataca automaticamente",
+        "suporte": "independente: ajuda automaticamente",
+        "aleatorio": "independente: alterna aleatoriamente entre atacar e ajudar",
+        "descontrole": (
+            "controlável pelo invocador (exige INT 18); abaixo disso ataca um combatente aleatório"
+            if inteligencia is None else
+            "controlado pelo invocador" if inteligencia >= 18 else
+            "descontrolado: ataca um combatente aleatório"
+        ),
+    }[independencia]
+
+
 def carregar_habilidades_loja() -> list:
     """Valida as habilidades da loja e seus metadados opcionais."""
     caminho = os.path.join(PASTA, "loja_habilidades.json")
@@ -3964,7 +4375,7 @@ def carregar_habilidades_loja() -> list:
 
     catalogo, nomes = [], set()
     obrigatorios = {"nome", "bonus", "duracao", "modo", "preco"}
-    opcionais = {"descricao", "requisitos", "custos", "efeitos"}
+    opcionais = {"descricao", "requisitos", "custos", "efeitos", "invocacao"}
     for indice, habilidade in enumerate(dados["habilidades"], 1):
         if (not isinstance(habilidade, dict) or not obrigatorios.issubset(habilidade)
                 or set(habilidade) - obrigatorios - opcionais):
@@ -3976,6 +4387,7 @@ def carregar_habilidades_loja() -> list:
         requisitos = habilidade.get("requisitos", {})
         custos = habilidade.get("custos", {})
         efeitos = habilidade.get("efeitos", [])
+        invocacao = habilidade.get("invocacao")
         if not isinstance(nome, str) or validar_nome(nome.strip()) or not nome.strip():
             raise ValueError(f"nome invalido na habilidade #{indice}.")
         if not isinstance(descricao, str):
@@ -3983,31 +4395,48 @@ def carregar_habilidades_loja() -> list:
         chave_nome = norm(nome)
         if chave_nome in nomes or chave_nome in CATALOGO_NORM:
             raise ValueError(f"nome duplicado ou em conflito com um item da loja: {nome}.")
-        if (not isinstance(bonus, dict) or not bonus
+        if not isinstance(modo, str) or norm(modo) not in TIPOS_HABILIDADE:
+            raise ValueError(f"tipo invalido na habilidade **{nome}**.")
+        modo = TIPOS_HABILIDADE[norm(modo)]
+        if (not isinstance(bonus, dict) or (not bonus and modo != "shikigami")
                 or any(k not in ATRIBUTOS_E_VITAIS for k in bonus)
                 or any(type(v) is not int and not (isinstance(v, str) and re.fullmatch(r"[+-]?\d+%", v))
                        for v in bonus.values())):
             raise ValueError(f"bonus invalido na habilidade **{nome}**.")
         if duracao is not None and (type(duracao) is not int or duracao < 1):
             raise ValueError(f"duracao invalida na habilidade **{nome}**; use um inteiro positivo ou null.")
-        if not isinstance(modo, str) or norm(modo) not in TIPOS_HABILIDADE:
-            raise ValueError(f"tipo invalido na habilidade **{nome}**.")
-        modo = TIPOS_HABILIDADE[norm(modo)]
+        if modo == "shikigami":
+            if (not isinstance(invocacao, str) or perfil_shikigami(invocacao) is None
+                    or duracao is not None):
+                raise ValueError(f"invocacao invalida na habilidade **{nome}**.")
+        elif invocacao is not None:
+            raise ValueError(f"metadado de invocacao inesperado na habilidade **{nome}**.")
         if type(preco) is not int or preco < 0:
             raise ValueError(f"preco invalido na habilidade **{nome}**; use um inteiro nao negativo.")
         if (not isinstance(requisitos, dict)
                 or any(atributo not in ATRIBUTOS or type(valor) is not int or valor < 1
                        for atributo, valor in requisitos.items())):
             raise ValueError(f"requisitos invalidos na habilidade **{nome}**; use atributos e valores inteiros positivos.")
+        if modo == "shikigami" and (
+                not requisitos or not set(requisitos).issubset({"inteligencia", "sabedoria"})):
+            raise ValueError(
+                f"a habilidade **{nome}** deve exigir inteligencia, sabedoria ou ambos."
+            )
         if (not isinstance(custos, dict)
                 or any(vital not in ("corpo", "mente") or type(valor) is not int or valor < 1
                        for vital, valor in custos.items())):
             raise ValueError(f"custos invalidos na habilidade **{nome}**; use corpo/mente e valores inteiros positivos.")
         efeitos = validar_efeitos_habilidade(efeitos, nome)
+        if modo == "mental" and (
+                not bonus or set(bonus) != {"inteligencia"} or efeitos):
+            raise ValueError(
+                f"a habilidade mental **{nome}** deve usar apenas bonus de inteligencia e nao pode aplicar condicoes."
+            )
         nomes.add(chave_nome)
         catalogo.append({
             "nome": nome.strip(), "bonus": bonus, "duracao": duracao, "modo": modo, "preco": preco,
             "descricao": descricao.strip(), "requisitos": requisitos, "custos": custos, "efeitos": efeitos,
+            "invocacao": invocacao,
         })
     return catalogo
 
@@ -4079,7 +4508,7 @@ def gerar_monstro(modelo, nivel: int, fator: float, chefe: bool, mult_xp: float)
             "vontade": mente, "ataques": modelo["ataques"], "chefe": chefe, "xp": xp,
             "personalidade": personalidade,
             "habilidade": PERSONALIDADES_MONSTRO[personalidade]["habilidade"],
-            "fugiu": False, "efeitos": []}
+            "fugiu": False, "efeitos": [], "modos_dano": modelo.get("modos_dano")}
 
 
 def rolar_monstro(m: dict, attr: str, extra_bonus: int = 0) -> dict:
@@ -4171,8 +4600,12 @@ def _t(r: dict) -> str:
     return f"{r['total']}" + ("⭐" if r["dado"] == 20 else "")
 
 
-def golpe(atk, dfn, acerto: str, dano: str, bonus_acerto: int = 0, bonus_dano: int = 0):
+def golpe(atk, dfn, acerto: str, dano: str, bonus_acerto: int = 0, bonus_dano: int = 0,
+          modo=None):
     """um golpe completo. atk/dfn: ficha (sqlite Row) ou inimigo (dict). retorna (texto, pontos, campo)."""
+    modos_permitidos = dfn.get("modos_dano") if isinstance(dfn, dict) else None
+    if modos_permitidos and modo not in modos_permitidos:
+        return "❌ O golpe não teve efeito.", 0, None
     ra, rd = rolagem(atk, acerto, bonus_acerto), rolagem(dfn, acerto)
     cab = f"{SIG[acerto]} {_t(ra)}×{_t(rd)}"
     dif = ra["total"] - rd["total"]
@@ -4241,12 +4674,12 @@ def processar_efeitos_monstro(run: dict, m: dict) -> list:
 
 
 def acao_ataque(f, m: dict, acerto: str, dano: str, nome_hab=None, bonus_acerto=0, bonus_dano=0,
-                reg=None, tot=None, efeitos_status=None) -> list:
+                reg=None, tot=None, efeitos_status=None, modo=None) -> list:
     """reg: contagem do andar do jogador; tot: contagem da dungeon inteira (ranking).
     ambos tem "dano", "acertos" e "abates"; dano conta so o que realmente tirou do inimigo."""
     contas = [c for c in (reg, tot) if c is not None]
     vivo_antes = inimigo_vivo(m)
-    texto, pts, campo = golpe(f, m, acerto, dano, bonus_acerto, bonus_dano)
+    texto, pts, campo = golpe(f, m, acerto, dano, bonus_acerto, bonus_dano, modo)
     extra = f" com {nome_hab}" if nome_hab else ""
     linha = f"⚔️ **{f['nome']}** → **{m['nome']}**{extra}: {texto}"
     if "✔" in texto:
@@ -4268,11 +4701,91 @@ def acao_ataque(f, m: dict, acerto: str, dano: str, nome_hab=None, bonus_acerto=
     return linhas
 
 
+def acao_ataque_mental(run, ficha, alvo, hab) -> list:
+    modos_permitidos = alvo.get("modos_dano") if isinstance(alvo, dict) else None
+    if modos_permitidos and "magia" not in modos_permitidos:
+        return ["❌ O ataque mental não teve efeito."]
+    if alvo["mente"] <= 0:
+        return [f"🌀 **{alvo['nome']}** já está sem mente."]
+
+    bonus = json.loads(hab["bonus"] or "{}")
+    bonus_inteligencia = valor_bonus(bonus.get("inteligencia", 0), ficha["inteligencia"])
+    ataque = rolagem(ficha, "inteligencia", bonus_inteligencia)
+    defesa = rolagem(alvo, "sabedoria")
+    margem = ataque["total"] - defesa["total"]
+    linha = (f"🧠 **{ficha['nome']}** → **{alvo['nome']}** ({hab['nome']}): "
+             f"INT {_t(ataque)} × SAB {_t(defesa)}")
+    if margem <= 4:
+        return [linha + " → resistiu; nenhum dano mental."]
+
+    dano = margem - 4
+    antes = alvo["mente"]
+    alvo["mente"] = max(0, antes - dano)
+    dano_real = antes - alvo["mente"]
+    linhas = [linha + f" → 🌀 {dano_real} de dano mental (mente {antes}→{alvo['mente']})"]
+    contribuicao = run["contrib"].setdefault(
+        ficha["id"], {"dano": 0, "acertos": 0, "abates": 0}
+    )
+    resumo = run["resumo"][ficha["id"]]
+    contribuicao["dano"] = contribuicao.get("dano", 0) + dano_real
+    contribuicao["acertos"] = contribuicao.get("acertos", 0) + 1
+    resumo["dano"] = resumo.get("dano", 0) + dano_real
+    resumo["acertos"] = resumo.get("acertos", 0) + 1
+    if alvo["mente"] == 0:
+        linhas.append(f"💤 **{alvo['nome']}** ficou sem mente e perde as próximas ações.")
+    return linhas
+
+
+def modo_ataque_monstro(acerto: str, dano: str):
+    if acerto == "precisao":
+        return "magia" if dano == "inteligencia" else "longe"
+    if acerto == "combate":
+        return "jujutsu" if dano == "inteligencia" else "perto"
+    return None
+
+
+def nivel_observacao(total: int) -> int:
+    if total >= 18:
+        return 2
+    if total >= 12:
+        return 1
+    return 0
+
+
+def detalhes_observacao_monstro(monstro: dict, nivel: int) -> list:
+    if nivel < 1:
+        return []
+    ataques = [
+        f"{nome} ({nome_tipo_habilidade(modo_ataque_monstro(acerto, dano))})"
+        for nome, acerto, dano in monstro.get("ataques", [])
+    ]
+    detalhes = ["Ataques: " + (", ".join(ataques) if ataques else "padrão desconhecido")]
+    if nivel >= 2:
+        atributos = sorted(
+            ((atributo, valor) for atributo, valor in monstro["attrs"].items() if valor > 0),
+            key=lambda par: (-par[1], ATRIBUTOS[par[0]]),
+        )[:2]
+        if atributos:
+            detalhes.append(
+                "Atributos mais fortes: "
+                + ", ".join(f"{ATRIBUTOS[attr]} {valor}" for attr, valor in atributos)
+            )
+        modos_dano = monstro.get("modos_dano")
+        if modos_dano:
+            detalhes.append("Vulnerável a: " + texto_modos_dano(modos_dano))
+        else:
+            detalhes.append("Não demonstra vulnerabilidade específica a tipos de ataque.")
+    return detalhes
+
+
 def acao_monstro(run: dict, m: dict) -> list:
     condicao = condicao_impede_acao(m.get("efeitos", []))
     if condicao:
         return [f"⚠️ **{m['nome']}** está sob **{condicao}** e perde a ação."]
+    if m["mente"] <= 0:
+        return [f"🌀 **{m['nome']}** está sem mente e perde a ação."]
     alvos = [f for f in (get_ficha_id(fid) for fid in ativos(run)) if f and f["corpo"] > 0]
+    alvos += shikigami_em_combate(run)
     if not alvos:
         return []
 
@@ -4302,7 +4815,9 @@ def acao_monstro(run: dict, m: dict) -> list:
         return [f"🏃 **{m['nome']}** usou **{habilidade}** e fugiu do combate; não concede XP próprio."]
 
     if personalidade == "tatico":
-        f = min(alvos, key=lambda ficha: ficha["corpo"] / maximos(ficha, get_bonus(ficha["id"]))[0])
+        f = min(alvos, key=lambda ficha: ficha["corpo"] / (
+            ficha["vigor"] if isinstance(ficha, dict) else maximos(ficha, get_bonus(ficha["id"]))[0]
+        ))
     else:
         f = random.choice(alvos)
     nome_atk, acerto, dano = random.choice(m["ataques"])
@@ -4311,11 +4826,15 @@ def acao_monstro(run: dict, m: dict) -> list:
     if especial:
         nome_atk = habilidade
         bonus = 3 if personalidade == "tatico" else 2
-    texto, pts, campo = golpe(m, f, acerto, dano, bonus, bonus)
+    texto, pts, campo = golpe(
+        m, f, acerto, dano, bonus, bonus, modo_ataque_monstro(acerto, dano)
+    )
     linha = f"👹 **{m['nome']}** → **{f['nome']}** ({nome_atk}): {texto}"
     if pts:
         antes, depois = aplicar_dano(f, pts, campo)
         linha += f" ({campo} {antes}→{depois})"
+        if isinstance(f, dict) and depois == 0:
+            linha += f" — **{f['nome']}** foi derrotado."
     linhas = [linha]
     efeito = EFEITOS_ATAQUES_MONSTRO.get(norm(nome_atk))
     if pts and efeito:
@@ -4327,6 +4846,306 @@ def acao_monstro(run: dict, m: dict) -> list:
 
 # estado das dungeons
 DUNGEONS = {}   # id do canal -> dungeon
+DUNGEONS_REINICIO_VERIFICADO = False
+
+
+def atributos_shikigami(owner, perfil: dict) -> dict:
+    atributos = {}
+    for atributo in ATRIBUTOS:
+        base, peso_int, peso_sab, divisor = perfil["atributos"].get(atributo, (0, 0, 0, 1))
+        valor = base + (owner["inteligencia"] * peso_int + owner["sabedoria"] * peso_sab) // divisor
+        atributos[atributo] = max(0, min(LIMITE_ATRIBUTO, valor))
+    return atributos
+
+
+def vital_shikigami(owner, formula: tuple[int, int, int, int]) -> int:
+    base, peso_int, peso_sab, divisor = formula
+    return max(1, base + (owner["inteligencia"] * peso_int + owner["sabedoria"] * peso_sab) // divisor)
+
+
+def invocar_shikigami(run, owner, hab):
+    perfil = perfil_shikigami(hab["invocacao"])
+    if perfil is None:
+        raise ValueError(f"invocacao sem perfil definido: {hab['nome']}")
+    if any(norm(shiki["invocacao"]) == norm(hab["invocacao"]) and shiki["corpo"] > 0
+           for shiki in run["shikigami"].values()):
+        return None
+
+    sid = run["proximo_shikigami"]
+    run["proximo_shikigami"] += 1
+    corpo = vital_shikigami(owner, perfil["corpo"])
+    mente = vital_shikigami(owner, perfil["mente"])
+    shiki = {
+        "id": sid,
+        "owner": owner["id"],
+        "owner_nome": owner["nome"],
+        "habilidade_id": hab["id"],
+        "habilidade": hab["nome"],
+        "invocacao": hab["invocacao"],
+        "nome": f"{hab['nome'].partition(':')[2].strip()} de {owner['nome']}",
+        "attrs": atributos_shikigami(owner, perfil),
+        "corpo": corpo,
+        "vigor": corpo,
+        "mente": mente,
+        "vontade": mente,
+        "ataque": perfil["ataque"],
+        "especial": perfil["especial"],
+        "independencia": perfil["independencia"],
+        "modos_dano": perfil.get("modos_dano"),
+        "efeitos": [],
+        "fugiu": False,
+    }
+    run["shikigami"][sid] = shiki
+    if run["estado"] == "combate":
+        run["ordem"].insert(run["pos"] + 1, ("s", sid))
+    return shiki
+
+
+def shikigami_da_vez(run):
+    if not run.get("ordem"):
+        return None
+    tipo, ref = run["ordem"][run["pos"]]
+    return run.get("shikigami", {}).get(ref) if tipo == "s" else None
+
+
+def eliminar_invocacoes_do_dono(run, ficha_id: int) -> None:
+    for shiki in run.get("shikigami", {}).values():
+        if shiki["owner"] == ficha_id:
+            shiki["corpo"] = 0
+
+
+def shikigami_em_combate(run) -> list:
+    return [
+        shiki for shiki in run.get("shikigami", {}).values()
+        if shiki["corpo"] > 0 and shiki["owner"] in run["jogadores"]
+        and not run["jogadores"][shiki["owner"]].get("fugiu")
+    ]
+
+
+def texto_vital_shikigami(shiki) -> str:
+    return (f"corpo {shiki['corpo']}/{shiki['vigor']} • "
+            f"mente {shiki['mente']}/{shiki['vontade']}")
+
+
+def atacar_com_shikigami(run, shiki, alvo, tecnica=None, alvo_tipo="m") -> list:
+    tecnica = tecnica or shiki["ataque"]
+    acerto, dano = MODOS_ATAQUE[tecnica["modo"]]
+    texto, pontos, campo = golpe(
+        shiki, alvo, acerto, dano,
+        tecnica.get("bonus_acerto", 0), tecnica.get("bonus_dano", 0), tecnica["modo"],
+    )
+    linhas = [f"🪬 **{shiki['nome']}** → **{alvo['nome']}** "
+              f"({tecnica['nome']}): {texto}"]
+    if "✔" in texto and alvo_tipo == "m":
+        for contribuicao in (
+            run["contrib"].setdefault(shiki["owner"], {"dano": 0, "acertos": 0, "abates": 0}),
+            run["resumo"][shiki["owner"]],
+        ):
+            contribuicao["acertos"] = contribuicao.get("acertos", 0) + 1
+    vivo_antes = inimigo_vivo(alvo) if alvo_tipo == "m" else alvo["corpo"] > 0
+    if pontos:
+        antes, depois = aplicar_dano(alvo, pontos, campo)
+        dano_real = antes - depois
+        linhas[0] += f" ({campo} {antes}→{depois})"
+        if alvo_tipo == "m":
+            for contribuicao in (
+                run["contrib"].setdefault(shiki["owner"], {"dano": 0, "acertos": 0, "abates": 0}),
+                run["resumo"][shiki["owner"]],
+            ):
+                contribuicao["dano"] = contribuicao.get("dano", 0) + dano_real
+        alvo_vivo = inimigo_vivo(alvo) if alvo_tipo == "m" else alvo["corpo"] > 0
+        if alvo_vivo and tecnica.get("efeitos"):
+            linhas += texto_aplicacao_condicoes(alvo, tecnica["efeitos"], shiki["owner"])
+    alvo_vivo = inimigo_vivo(alvo) if alvo_tipo == "m" else alvo["corpo"] > 0
+    if vivo_antes and not alvo_vivo:
+        if alvo_tipo == "j":
+            linhas.append(f"💀 **{alvo['nome']}** foi atingido até ficar sem corpo.")
+        else:
+            linhas.append(f"☠️ **{alvo['nome']}** foi derrotado por **{shiki['nome']}**.")
+    if alvo_tipo == "m" and vivo_antes and not alvo_vivo:
+        for contribuicao in (
+            run["contrib"].setdefault(shiki["owner"], {"dano": 0, "acertos": 0, "abates": 0}),
+            run["resumo"][shiki["owner"]],
+        ):
+            contribuicao["abates"] = contribuicao.get("abates", 0) + 1
+    return linhas
+
+
+def usar_especial_shikigami(run, shiki, alvo_ref=None, ctx=None) -> list:
+    especial = shiki["especial"]
+    tipo = especial["tipo"]
+    if tipo == "ataque":
+        if not alvo_ref or alvo_ref[0] != "m":
+            return ["informe um inimigo como alvo para essa técnica."]
+        alvo = run["inimigos"][alvo_ref[1]]
+        if not inimigo_vivo(alvo):
+            return ["esse inimigo já foi derrotado."]
+        return atacar_com_shikigami(run, shiki, alvo, especial)
+
+    if alvo_ref is None:
+        alvo_ref = ("j", shiki["owner"])
+    if tipo in ("cura", "buff"):
+        if alvo_ref[0] != "j" or alvo_ref[1] not in run["jogadores"]:
+            return ["essa técnica precisa ter como alvo um aliado do grupo."]
+        alvo = get_ficha_id(alvo_ref[1])
+        if not alvo or run["jogadores"][alvo_ref[1]].get("fugiu"):
+            return ["esse aliado não pode ser alvo agora."]
+        if tipo == "cura":
+            campo = especial["campo"]
+            maximo = maximos(alvo, get_bonus(alvo["id"]))[0 if campo == "corpo" else 1]
+            antes = alvo[campo]
+            ganho = max(1, maximo * especial["percentual"] // 100)
+            novo = min(maximo, antes + ganho)
+            db.execute(f"UPDATE fichas SET {campo}=? WHERE id=?", (novo, alvo["id"]))
+            db.commit()
+            if ctx:
+                registrar_alvo(ctx, alvo)
+            return [f"💚 **{shiki['nome']}** usou **{especial['nome']}** em **{alvo['nome']}**: "
+                    f"{SIG[campo]} {antes}→{novo}."]
+
+        db.execute(
+            "INSERT INTO status (ficha_id, nome, tipo, bonus, duracao) VALUES (?, ?, 'estatico', ?, ?) "
+            "ON CONFLICT(ficha_id, nome) DO UPDATE SET tipo='estatico', bonus=excluded.bonus, duracao=excluded.duracao",
+            (alvo["id"], f"shikigami {shiki['nome']}", json.dumps(especial["atributos"]), especial["duracao"]),
+        )
+        db.commit()
+        normalizar_vitais(alvo["id"])
+        if ctx:
+            registrar_alvo(ctx, alvo)
+        return [f"✨ **{shiki['nome']}** usou **{especial['nome']}** em **{alvo['nome']}**: "
+                f"{fmt_bonus(especial['atributos'])} por {especial['duracao']} turno(s)."]
+
+    if tipo == "debuff":
+        if not alvo_ref or alvo_ref[0] != "m":
+            return ["informe um inimigo como alvo para essa técnica."]
+        alvo = run["inimigos"][alvo_ref[1]]
+        if not inimigo_vivo(alvo):
+            return ["esse inimigo já foi derrotado."]
+        alvo.setdefault("efeitos", []).append({
+            "nome": especial["nome"], "bonus": especial["atributos"], "duracao": especial["duracao"],
+        })
+        return [f"🕸️ **{shiki['nome']}** usou **{especial['nome']}** em **{alvo['nome']}**: "
+                f"{fmt_bonus(especial['atributos'])} por {especial['duracao']} turno(s)."]
+
+    return [f"técnica de shikigami inválida: {tipo}."]
+
+
+def acao_automatica_shikigami(run, shiki) -> list:
+    if shiki["independencia"] == "descontrole":
+        alvos = [
+            ("m", monstro) for monstro in run["inimigos"] if inimigo_vivo(monstro)
+        ]
+        for fid in ativos(run):
+            ficha = get_ficha_id(fid)
+            if ficha and ficha["corpo"] > 0:
+                alvos.append(("j", ficha))
+        alvos += [
+            ("s", outro) for outro in shikigami_em_combate(run)
+            if outro["id"] != shiki["id"]
+        ]
+        if not alvos:
+            return []
+        alvo_tipo, alvo = random.choice(alvos)
+        tecnica = shiki["ataque"]
+        especial = shiki["especial"]
+        if especial["tipo"] == "ataque" and random.random() < 0.35:
+            tecnica = especial
+        return atacar_com_shikigami(run, shiki, alvo, tecnica, alvo_tipo)
+
+    alvos = [monstro for monstro in run["inimigos"] if inimigo_vivo(monstro)]
+    if not alvos:
+        return []
+    acao = shiki["independencia"]
+    if acao == "aleatorio":
+        acao = random.choice(("ataque", "ajuda"))
+    if acao == "ataque":
+        alvo = random.choice(alvos)
+        especial = shiki["especial"]
+        if especial["tipo"] == "ataque" and random.random() < 0.25:
+            return atacar_com_shikigami(run, shiki, alvo, especial)
+        if especial["tipo"] == "debuff" and random.random() < 0.25:
+            return usar_especial_shikigami(
+                run, shiki, ("m", run["inimigos"].index(alvo))
+            )
+        return atacar_com_shikigami(run, shiki, alvo)
+
+    especial = shiki["especial"]
+    if especial["tipo"] in ("cura", "buff"):
+        aliados = [
+            get_ficha_id(fid) for fid in ativos(run)
+            if get_ficha_id(fid) and get_ficha_id(fid)["corpo"] > 0
+        ]
+        if aliados:
+            if especial["tipo"] == "cura":
+                campo = especial["campo"]
+                indice = 0 if campo == "corpo" else 1
+                alvo = min(
+                    aliados,
+                    key=lambda ficha: ficha[campo] / max(1, maximos(ficha, get_bonus(ficha["id"]))[indice]),
+                )
+                maximo = maximos(alvo, get_bonus(alvo["id"]))[indice]
+                if alvo[campo] < maximo:
+                    return usar_especial_shikigami(run, shiki, ("j", alvo["id"]))
+            else:
+                dono = get_ficha_id(shiki["owner"])
+                if dono and dono["corpo"] > 0:
+                    return usar_especial_shikigami(run, shiki, ("j", dono["id"]))
+    if especial["tipo"] == "debuff":
+        alvo_i, _ = max(
+            ((i, monstro) for i, monstro in enumerate(run["inimigos"]) if inimigo_vivo(monstro)),
+            key=lambda par: par[1]["corpo"] / max(1, par[1]["vigor"]),
+        )
+        return usar_especial_shikigami(run, shiki, ("m", alvo_i))
+    return atacar_com_shikigami(run, shiki, random.choice(alvos))
+
+
+def registrar_participante_dungeon(run, ficha_id: int) -> None:
+    participante = run["jogadores"][ficha_id]
+    db.execute(
+        "INSERT OR REPLACE INTO dungeon_ativas (canal_id, ficha_id, user_id) VALUES (?, ?, ?)",
+        (run["canal"], ficha_id, participante["user"]),
+    )
+    db.commit()
+
+
+def remover_participante_dungeon(canal_id: int, ficha_id: int) -> None:
+    db.execute("DELETE FROM status WHERE ficha_id=? AND tipo='condicao'", (ficha_id,))
+    db.execute("DELETE FROM dungeon_ativas WHERE canal_id=? AND ficha_id=?", (canal_id, ficha_id))
+    db.commit()
+
+
+def limpar_registro_dungeon(run) -> None:
+    for ficha_id in run["resumo"]:
+        db.execute("DELETE FROM status WHERE ficha_id=? AND tipo='condicao'", (ficha_id,))
+    db.execute("DELETE FROM dungeon_ativas WHERE canal_id=?", (run["canal"],))
+    db.commit()
+
+
+async def encerrar_dungeons_interrompidas() -> None:
+    registros = db.execute(
+        "SELECT canal_id, ficha_id FROM dungeon_ativas ORDER BY canal_id, ficha_id"
+    ).fetchall()
+    if not registros:
+        return
+
+    canais = set()
+    for registro in registros:
+        canais.add(registro["canal_id"])
+        db.execute("DELETE FROM status WHERE ficha_id=? AND tipo='condicao'", (registro["ficha_id"],))
+    db.execute("DELETE FROM dungeon_ativas")
+    db.commit()
+
+    for canal_id in canais:
+        canal = bot.get_channel(canal_id)
+        try:
+            if canal is None:
+                canal = await bot.fetch_channel(canal_id)
+            await canal.send(
+                "⌛ a dungeon foi encerrada automaticamente porque o bot reiniciou. "
+                "nenhum progresso de combate foi retomado e as condições temporárias foram removidas."
+            )
+        except discord.HTTPException as erro:
+            print(f"nao foi possivel avisar sobre a dungeon interrompida no canal {canal_id}: {erro}")
 
 
 class EmCombate(commands.CheckFailure):
@@ -4438,8 +5257,11 @@ def texto_painel(run) -> str:
                 for e in m.get("efeitos", []) if e.get("condicao") in CONDICOES
             ]
             marca_status = " · " + " ".join(condicoes) if condicoes else ""
+            nivel_observado = run.get("observacoes", {}).get(i - 1, 0)
+            detalhes = detalhes_observacao_monstro(m, nivel_observado)
+            marca_observacao = " · 🔎 " + "; ".join(detalhes) if detalhes else ""
             linhas.append(f"{i}. {'👑 ' if m['chefe'] else ''}**{m['nome']}** — corpo {m['corpo']}/{m['vigor']} • "
-                          f"mente {m['mente']}/{m['vontade']}{marca_status}")
+                          f"mente {m['mente']}/{m['vontade']}{marca_status}{marca_observacao}")
         elif m.get("fugiu"):
             linhas.append(f"{i}. ~~{m['nome']}~~ 🏃 fugiu")
         else:
@@ -4465,6 +5287,23 @@ def texto_painel(run) -> str:
                           f"{marca_status}"
                           + (" (fugiu da luta)" if icone == "🏃"
                              else " (desmaiado)" if icone == "💤" else ""))
+    for shiki in run.get("shikigami", {}).values():
+        dono = shiki["owner_nome"]
+        ficha_dono = get_ficha_id(shiki["owner"])
+        inteligencia = ficha_dono["inteligencia"] if ficha_dono else None
+        if shiki["corpo"] <= 0:
+            linhas.append(f"🪬 ~~**{shiki['nome']}**~~ — derrotado (invocador: {dono})")
+            continue
+        condicoes = [
+            f"{ICONE_CONDICAO[e['condicao']]}{e['duracao']}"
+            for e in shiki.get("efeitos", []) if e.get("condicao") in CONDICOES
+        ]
+        marca_status = " · " + " ".join(condicoes) if condicoes else ""
+        linhas.append(f"🪬 **{shiki['nome']}** — {texto_vital_shikigami(shiki)}"
+                      f"{marca_status} (invocador: {dono}; "
+                      f"{texto_autonomia_shikigami(shiki['independencia'], inteligencia)})"
+                      + (f" • só recebe dano de {texto_modos_dano(shiki['modos_dano'])}"
+                         if shiki.get("modos_dano") else ""))
     return "\n".join(linhas)
 
 
@@ -4472,6 +5311,9 @@ def texto_vez(run) -> str:
     tipo, ref = run["ordem"][run["pos"]]
     if tipo == "m":
         return f"vez de {run['inimigos'][ref]['nome']}."
+    if tipo == "s":
+        shiki = run.get("shikigami", {}).get(ref)
+        return f"vez de **{shiki['nome']}**." if shiki else ""
     f = get_ficha_id(ref)
     return f"vez de **{f['nome']}**." if f else ""
 
@@ -4489,9 +5331,11 @@ def verificar_mortes(run) -> list:
     for fid in list(run["jogadores"]):
         f = get_ficha_id(fid)
         if f is None:
+            eliminar_invocacoes_do_dono(run, fid)
             del run["jogadores"][fid]
             continue
         if f["corpo"] <= 0:
+            eliminar_invocacoes_do_dono(run, fid)
             db.execute("DELETE FROM fichas WHERE id=?", (fid,))
             db.commit()
             renumerar(run["guild"], f["dono_id"])
@@ -4512,8 +5356,9 @@ def matar_desmaiados_em_combate(run):
     if not combatentes or any(ficha["mente"] > 0 for ficha in combatentes):
         return None
 
-    linhas = ["💤 todo o grupo ainda em combate desmaiou; os personagens desmaiados morreram."]
+    linhas = ["💤 todos os jogadores ainda em combate desmaiaram; os personagens desmaiados morreram."]
     for ficha in combatentes:
+        eliminar_invocacoes_do_dono(run, ficha["id"])
         db.execute("DELETE FROM fichas WHERE id=?", (ficha["id"],))
         db.commit()
         renumerar(run["guild"], ficha["dono_id"])
@@ -4587,6 +5432,7 @@ async def iniciar_andar(ctx, run):
     lo, hi = mult_dif(run)["niveis"]
     run["nivel"] = max(lo, min(hi, round(sum(niveis) / len(niveis))))   # inimigos ficam na faixa da dungeon
     run["inimigos"] = gerar_inimigos(run)
+    run["observacoes"] = {}
     run["estado"], run["rodada"] = "combate", 1
     for p in run["jogadores"].values():
         p["descansou"] = False
@@ -4594,6 +5440,10 @@ async def iniciar_andar(ctx, run):
     for fid in run["jogadores"]:
         f = get_ficha_id(fid)
         itens.append((rolar_attr(f, "agilidade")["total"], random.random(), ("j", fid), f["nome"]))
+    for sid, shiki in run.get("shikigami", {}).items():
+        if shiki["corpo"] > 0 and shiki["owner"] in run["jogadores"]:
+            itens.append((rolar_monstro(shiki, "agilidade")["total"], random.random(),
+                          ("s", sid), shiki["nome"]))
     for i, m in enumerate(run["inimigos"]):
         itens.append((rolar_monstro(m, "agilidade")["total"], random.random(), ("m", i), m["nome"]))
     itens.sort(key=lambda x: (-x[0], -x[1]))
@@ -4601,7 +5451,7 @@ async def iniciar_andar(ctx, run):
     total = mult_dif(run)["andares"]
     chefe = "  👑 andar do chefe!" if run["andar"] >= total else ""
     linhas = [f"🏰 **{TEMAS[run['tema']]['nome']}** ({run['dif']}) — andar {run['andar']}/{total}{chefe}",
-              "🎯 iniciativa: " + " > ".join(f"{x[3]} ({x[0]})" for x in itens)]
+              "🎯 ordem de iniciativa: " + " > ".join(x[3] for x in itens)]
     await processar_ordem(ctx, run, linhas)
 
 
@@ -4612,13 +5462,13 @@ async def processar_ordem(ctx, run, buf=None):
         if not run["jogadores"]:
             await fim_dungeon(ctx, run, "derrota", buf)
             return
-        if not any(inimigo_vivo(m) for m in run["inimigos"]):
-            await vitoria_andar(ctx, run, buf)
-            return
         mortes_desmaio = matar_desmaiados_em_combate(run)
         if mortes_desmaio is not None:
             buf += mortes_desmaio
             await fim_dungeon(ctx, run, "derrota", buf)
+            return
+        if not any(inimigo_vivo(m) for m in run["inimigos"]):
+            await vitoria_andar(ctx, run, buf)
             return
         if not ativos(run):   # todos fugiram da batalha: voltam ao acampamento, a dungeon continua
             run["estado"], run["repetir"] = "pausa", True
@@ -4634,10 +5484,41 @@ async def processar_ordem(ctx, run, buf=None):
             m = run["inimigos"][ref]
             if inimigo_vivo(m):
                 buf += acao_monstro(run, m)
-                buf += processar_efeitos_monstro(run, m)
+                if inimigo_vivo(m):
+                    buf += processar_efeitos_monstro(run, m)
                 buf += verificar_mortes(run)
             avancar_pos(run)
             continue
+        if tipo == "s":
+            shiki = run.get("shikigami", {}).get(ref)
+            if (not shiki or shiki["corpo"] <= 0 or shiki["owner"] not in run["jogadores"]
+                    or run["jogadores"][shiki["owner"]].get("fugiu")):
+                avancar_pos(run)
+                continue
+            condicao = condicao_impede_acao(shiki.get("efeitos", []))
+            if condicao:
+                buf.append(f"⚠️ **{shiki['nome']}** está sob **{condicao}** e perde a ação.")
+                buf += processar_efeitos_monstro(run, shiki)
+                if shiki["corpo"] <= 0:
+                    buf.append(f"🪬 **{shiki['nome']}** foi derrotado.")
+                avancar_pos(run)
+                continue
+            if not shikigami_controlavel(shiki):
+                buf += acao_automatica_shikigami(run, shiki)
+                buf += processar_efeitos_monstro(run, shiki)
+                if shiki["corpo"] <= 0:
+                    buf.append(f"🪬 **{shiki['nome']}** foi derrotado.")
+                buf += verificar_mortes(run)
+                avancar_pos(run)
+                continue
+            buf.append(
+                f"➡️ vez de **{shiki['nome']}** (<@{run['jogadores'][shiki['owner']]['user']}> controla)\n"
+                + texto_painel(run)
+                + "\n`!atacar [inimigo] [técnica opcional]` • "
+                  "`!usarh [técnica especial] [aliado ou inimigo]` • `!passar`"
+            )
+            await enviar_longo(ctx, "\n".join(buf))
+            return
         if ref not in run["jogadores"] or run["jogadores"][ref].get("fugiu"):
             avancar_pos(run)
             continue
@@ -4669,7 +5550,7 @@ async def processar_ordem(ctx, run, buf=None):
                    + texto_painel(run)
                    + "\n`!atacar [alvo] [tipo]` ou `!atacar [alvo] [habilidade]` • "
                      "`!usar [item] [aliado opcional]` • `!usarh [habilidade] [alvo opcional]` • "
-                     "`!descansar [crp|mnt]` • `!fugir` • `!passar`")
+                     "`!observar [inimigo]` • `!descansar [crp|mnt]` • `!fugir` • `!passar`")
         await enviar_longo(ctx, "\n".join(buf))
         return
     await enviar_longo(ctx, "\n".join(buf))
@@ -4696,8 +5577,8 @@ async def vitoria_andar(ctx, run, buf):
         xp += round((40 + 10 * run["nivel"]) * d["xp"])
     base_moedas = (8 + 2 * run["nivel"]) * d["moedas"] * (3 if ultimo else 1)
     buf.append(f"🏁 **andar {andar}/{total} limpo!**" if not ultimo else "🏆 **o chefe caiu! dungeon concluida!**")
-    # recompensa por contribuicao: pontos = dano real + 2 por acerto. media do grupo = 1.0; o minimo e 60% do xp base
-    # e o maximo 160%, mais uma variacao aleatoria de +-15% para cada um
+    # participacao = dano real + 2 por acerto + 5 por abate; sem participacao nao ha recompensa
+    # os demais recebem entre 60% e 160% da base, com variacao aleatoria de +-15%
     lutando = ativos(run)
     pont = {fid: run["contrib"].get(fid, {"dano": 0, "acertos": 0, "abates": 0}) for fid in lutando}
     pont = {fid: c["dano"] + 2 * c["acertos"] + 5 * c.get("abates", 0) for fid, c in pont.items()}
@@ -4708,6 +5589,9 @@ async def vitoria_andar(ctx, run, buf):
             continue
         if p.get("fugiu"):
             buf.append(f"🏃 **{f['nome']}** fugiu da luta: sem recompensa neste andar.")
+            continue
+        if pont.get(fid, 0) <= 0:
+            buf.append(f"🎁 **{f['nome']}**: sem participação neste andar; sem recompensa.")
             continue
         c = run["contrib"].get(fid, {"dano": 0, "acertos": 0, "abates": 0})
         rel = pont[fid] / soma * len(lutando) if soma > 0 else 1.0
@@ -4728,14 +5612,16 @@ async def vitoria_andar(ctx, run, buf):
         if f["nivel"] != -1:
             res["xp"] += xp_p
             partes.append(f"+{xp_p} xp • +{moedas_p} 💰 {luta}{destaque}")
+            historico_xp = f"+{xp_p} xp"
         else:
             partes.append(f"(nivel livre: sem xp) +{moedas_p} 💰 {luta}{destaque}")
+            historico_xp = "sem xp (nivel livre)"
         if itens:
             partes.append("itens: " + ", ".join(
                 f"**{nome_exibicao_item(it['nome'])}** [{fmt_bonus(it['bonus'])}]" for it in itens))
         buf.append(f"🎁 **{f['nome']}**: " + " • ".join(partes))
         buf += dar_xp(fid, xp_p)
-        registrar_historico(fid, p["user"], f"dungeon {run['tema']} andar {andar}: +{xp_p} xp, +{moedas_p} moedas"
+        registrar_historico(fid, p["user"], f"dungeon {run['tema']} andar {andar}: {historico_xp}, +{moedas_p} moedas"
                             + (", " + ", ".join(nome_exibicao_item(it["nome"]) for it in itens) if itens else ""))
     for nome in despertar_desmaiados_no_acampamento(run, ultimo):
         buf.append(f"💤 **{nome}** desperta no acampamento com 1 ponto de mente.")
@@ -4758,7 +5644,9 @@ async def vitoria_andar(ctx, run, buf):
 
 
 async def fim_dungeon(ctx, run, motivo: str, buf=None):
+    limpar_registro_dungeon(run)
     DUNGEONS.pop(run["canal"], None)
+    run.get("shikigami", {}).clear()
     buf = buf if buf is not None else []
     titulo = {"vitoria": "🏆 **dungeon concluida!**", "derrota": "☠️ **o grupo foi derrotado.**",
               "saiu": "🚪 **o grupo deixou a dungeon.**", "cancelada": "❌ **dungeon cancelada.**"}[motivo]
@@ -4843,11 +5731,14 @@ async def limpar_dungeons():
     agora = time.time()
     for cid, run in list(DUNGEONS.items()):
         if agora - run["ultima"] > INATIVIDADE_DUNGEON:
+            limpar_registro_dungeon(run)
+            run.get("shikigami", {}).clear()
             DUNGEONS.pop(cid, None)
             canal = bot.get_channel(cid)
             if canal:
                 try:
-                    await canal.send("⌛ dungeon encerrada por inatividade. as fichas que estavam nela foram mantidas.")
+                    await canal.send("⌛ dungeon encerrada por inatividade. as fichas foram mantidas "
+                                     "e as condições temporárias removidas.")
                 except discord.HTTPException as erro:
                     print(f"nao foi possivel avisar sobre a dungeon inativa no canal {cid}: {erro}")
 
@@ -5387,7 +6278,8 @@ async def validar_entrada(ctx, f) -> bool:
     return True
 
 
-AVISO_MORTE = ("se **{nome}** (nivel {nivel}) chegar a corpo 0, ou todo o grupo ainda em combate desmaiar, "
+AVISO_MORTE = ("se **{nome}** (nivel {nivel}) chegar a corpo 0, ou todos os jogadores ainda em combate desmaiarem "
+               "(shikigami ativo nao evita a derrota), "
                "as fichas dos mortos serao **apagadas para sempre** (nao da para restaurar). entrar mesmo assim?")
 
 
@@ -5428,10 +6320,13 @@ async def dg_criar(ctx, tokens):
     if f is None or ctx.channel.id in DUNGEONS or not await validar_entrada(ctx, f):
         return
     run = {"canal": ctx.channel.id, "guild": ctx.guild.id, "lider": ctx.author.id, "dif": dif, "tema": tema,
-           "estado": "lobby", "jogadores": {}, "resumo": {}, "inimigos": [], "ordem": [], "pos": 0, "rodada": 1,
-           "andar": 0, "nivel": 1, "contrib": {}, "ultima": time.time(), "lock": asyncio.Lock()}
+           "estado": "lobby", "jogadores": {}, "resumo": {}, "inimigos": [], "observacoes": {},
+           "ordem": [], "pos": 0, "rodada": 1, "andar": 0, "nivel": 1, "contrib": {},
+           "shikigami": {}, "proximo_shikigami": 1,
+           "ultima": time.time(), "lock": asyncio.Lock()}
     novo_jogador(run, f, ctx.author.id)
     DUNGEONS[ctx.channel.id] = run
+    registrar_participante_dungeon(run, f["id"])
     await ctx.send(texto_lobby(run))
 
 
@@ -5463,6 +6358,7 @@ async def dg_entrar(ctx, tokens):
                 or len(run["jogadores"]) >= MAX_JOGADORES or f is None or not await validar_entrada(ctx, f):
             return
         novo_jogador(run, f, ctx.author.id)
+        registrar_participante_dungeon(run, f["id"])
         run["ultima"] = time.time()
         await ctx.send(f"✅ **{f['nome']}** entrou no grupo.\n" + texto_lobby(run))
 
@@ -5540,6 +6436,8 @@ async def dg_sair(ctx):
             return
         nome = run["resumo"][fid]["nome"]
         run["resumo"][fid]["fim"] = "saiu com vida"
+        eliminar_invocacoes_do_dono(run, fid)
+        remover_participante_dungeon(run["canal"], fid)
         del run["jogadores"][fid]
         run["ultima"] = time.time()
         if not run["jogadores"]:
@@ -5597,12 +6495,14 @@ async def dungeon(ctx, *, raw: str = ""):
             f"**Temas disponíveis:** {temas}\n\n"
             "⚠️ **Risco permanente:** corpo em 0 ou todo o grupo ainda em combate desmaiado apaga as fichas dos mortos.\n"
             "Cada andar vencido concede XP, moedas e uma chance de encontrar itens. O último andar tem um chefe; "
-            "ele sempre deixa equipamento.\n\n"
+            "ele sempre deixa equipamento. Recompensas dependem da participação; quem não contribuir não recebe "
+            "XP, moedas nem itens.\n\n"
             "**Eventos e ranking**\n"
             "No acampamento podem surgir eventos. Nos eventos de grupo, todos votam; nos individuais, "
             "a escolha cabe ao explorador indicado. Use `!escolher` para votar ou decidir.\n"
             "Quem acumular mais abates entre os participantes que concluírem a dungeon pode receber o prêmio de MVP. "
-            "Consulte `!ranking` para ver o ranking do servidor.\n\n"
+            "Consulte `!ranking` para ver o ranking do servidor. Condições temporárias são removidas ao sair "
+            "da Dungeon. Se o bot reiniciar, a expedição é encerrada automaticamente sem retomada.\n\n"
             "**Combate**\n"
             "Força e inteligência contribuem para o dano ao corpo. Consulte `!ajuda atacar` e `!ajuda usarh` "
             "para ver os detalhes das ações."
@@ -5656,18 +6556,77 @@ def inferir_ataque_por_habilidade(tokens, ficha_id, vivos):
 
 
 async def validar_vez(ctx, run):
-    fid = jogador_do_usuario(run, ctx.author.id)
-    if fid is None:
-        await ctx.send("voce nao esta nessa dungeon.")
-        return None
     if run["estado"] != "combate":
         await ctx.send("nao ha combate agora.")
         return None
-    if run["ordem"][run["pos"]] != ("j", fid):
+    tipo, ref = run["ordem"][run["pos"]]
+    if tipo == "s":
+        shiki = run.get("shikigami", {}).get(ref)
+        if not shiki or not shikigami_controlavel(shiki):
+            await ctx.send("essa invocação age por conta própria; descontrolados exigem INT 18 para serem comandados.")
+            return None
+        fid = shiki["owner"]
+        participante = run["jogadores"].get(fid)
+        if not participante or participante["user"] != ctx.author.id:
+            await ctx.send("só o invocador pode controlar esse shikigami.")
+            return None
+    else:
+        fid = jogador_do_usuario(run, ctx.author.id)
+        if fid is None:
+            await ctx.send("voce nao esta nessa dungeon.")
+            return None
+    if (tipo, ref) != ("j", fid) and not (tipo == "s" and run["shikigami"][ref]["owner"] == fid):
         await ctx.send(f"ainda nao e a sua vez: {texto_vez(run)}")
         return None
     run["ultima"] = time.time()
     return fid
+
+
+def alvo_inimigo_shikigami(run, texto: str):
+    candidatos = [monstro for monstro in run["inimigos"] if inimigo_vivo(monstro)]
+    numero = re.fullmatch(r"#?(\d+)", texto.strip())
+    if numero:
+        indice = int(numero.group(1)) - 1
+        return indice if 0 <= indice < len(run["inimigos"]) and inimigo_vivo(run["inimigos"][indice]) else None
+    alvo = achar_nome(candidatos, texto)
+    return next((i for i, monstro in enumerate(run["inimigos"]) if monstro is alvo), None) if alvo else None
+
+
+def separar_ataque_shikigami(run, shiki, raw: str):
+    tokens = tokenizar(raw)
+    tecnicas = [shiki["ataque"]]
+    if shiki["especial"]["tipo"] == "ataque":
+        tecnicas.append(shiki["especial"])
+    for pos in range(1, len(tokens)):
+        alvo_txt = " ".join(token for token, _ in tokens[:pos]).strip().strip(ASPAS).strip()
+        alvo = alvo_inimigo_shikigami(run, alvo_txt)
+        if alvo is None:
+            continue
+        tecnica_txt = " ".join(token for token, _ in tokens[pos:]).strip().strip(ASPAS).strip()
+        if not tecnica_txt:
+            return alvo, shiki["ataque"]
+        if norm(tecnica_txt) in MODOS_ATAQUE:
+            tecnica = next((tecnica for tecnica in tecnicas
+                            if tecnica["modo"] == norm(tecnica_txt)), None)
+            if tecnica:
+                return alvo, tecnica
+        achada = achar_nome([{"nome": tecnica["nome"], "tecnica": tecnica} for tecnica in tecnicas], tecnica_txt)
+        if achada:
+            return alvo, achada["tecnica"]
+    if tokens:
+        alvo = alvo_inimigo_shikigami(run, " ".join(token for token, _ in tokens).strip().strip(ASPAS))
+        if alvo is not None:
+            return alvo, shiki["ataque"]
+    return None, None
+
+
+async def fim_da_acao_shikigami(ctx, run, shiki, linhas):
+    if shiki["corpo"] > 0:
+        linhas += processar_efeitos_monstro(run, shiki)
+    if shiki["corpo"] <= 0:
+        linhas.append(f"🪬 **{shiki['nome']}** foi derrotado.")
+    avancar_pos(run)
+    await processar_ordem(ctx, run, linhas)
 
 
 @bot.command(name="atacar")
@@ -5678,6 +6637,18 @@ async def atacar(ctx, *, raw: str = ""):
     async with run["lock"]:
         fid = await validar_vez(ctx, run)
         if fid is None:
+            return
+        shiki = shikigami_da_vez(run)
+        if shiki:
+            alvo_i, tecnica = separar_ataque_shikigami(run, shiki, raw)
+            if alvo_i is None or tecnica is None:
+                await ctx.send(
+                    f"uso: `!atacar [inimigo]` ou `!atacar [inimigo] [{shiki['ataque']['nome']}]`."
+                    + (f" técnica especial: `{shiki['especial']['nome']}`." if shiki["especial"]["tipo"] == "ataque" else "")
+                )
+                return
+            linhas = atacar_com_shikigami(run, shiki, run["inimigos"][alvo_i], tecnica)
+            await fim_da_acao_shikigami(ctx, run, shiki, linhas)
             return
         f = get_ficha_id(fid)
         vivos = [(i, m) for i, m in enumerate(run["inimigos"]) if inimigo_vivo(m)]
@@ -5690,7 +6661,7 @@ async def atacar(ctx, *, raw: str = ""):
             if hab_incompativel:
                 await ctx.send(
                     f"**{hab_incompativel['nome']}** nao e uma habilidade de ataque. "
-                    "Use `!usarh` para ativar melhorias e penalidades."
+                    "Use `!usarh` para habilidades mentais, melhorias, penalidades e invocações."
                 )
                 return
             if hab is None:
@@ -5735,6 +6706,12 @@ async def atacar(ctx, *, raw: str = ""):
         ba = bd = 0
         nome_hab = None
         if hab:
+                if hab["modo"] not in MODOS_ATAQUE:
+                    await ctx.send(
+                        f"**{hab['nome']}** não pode ser usado com `!atacar`; "
+                        "use `!usarh` para habilidades mentais, melhorias, penalidades e invocações."
+                    )
+                    return
                 if hab["modo"] in MODOS_ATAQUE and hab["modo"] != modo:
                     await ctx.send(f"**{hab['nome']}** e do tipo **{nome_tipo_habilidade(hab['modo'])}**; "
                                    f"use `!atacar [alvo] {hab['modo']}/{hab['nome']}`.")
@@ -5753,7 +6730,8 @@ async def atacar(ctx, *, raw: str = ""):
                         bd = sum(valor_bonus(bonus.get(attr, 0), f[attr]) for attr in dano) // 2
                     else:
                         bd = valor_bonus(bonus.get(dano, 0), f[dano])
-                    if not ba and not bd:
+                    efeitos_habilidade = json.loads(hab["efeitos"] or "[]")
+                    if not ba and not bd and not efeitos_habilidade:
                         if isinstance(dano, tuple) and isinstance(dano[1], tuple):
                             attrs_dano = f"{ATRIBUTOS[dano[0]]} e {ATRIBUTOS[dano[1][0]]}/{dano[1][1]}"
                         else:
@@ -5768,7 +6746,8 @@ async def atacar(ctx, *, raw: str = ""):
         linhas = acao_ataque(f, m, acerto, dano, nome_hab, ba, bd,
                              reg=run["contrib"].setdefault(fid, {"dano": 0, "acertos": 0, "abates": 0}),
                              tot=run["resumo"][fid],
-                             efeitos_status=json.loads(hab["efeitos"] or "[]") if hab else None)
+                             efeitos_status=json.loads(hab["efeitos"] or "[]") if hab else None,
+                             modo=modo)
         if hab:
             linhas += pagar_custo_habilidade(f, hab)
         await fim_da_acao(ctx, run, fid, linhas)
@@ -5782,6 +6761,9 @@ async def usar(ctx, *, raw: str = ""):
     async with run["lock"]:
         fid = await validar_vez(ctx, run)
         if fid is None:
+            return
+        if shikigami_da_vez(run):
+            await ctx.send("shikigami não usa itens. comande uma técnica com `!atacar` ou `!usarh`, ou `!passar`.")
             return
         nome_txt, alvo_ref = separar_alvo_dungeon(run, raw, inimigos=False)
         if alvo_ref and alvo_ref[0] == "a":
@@ -5839,6 +6821,9 @@ async def descansar(ctx, *, raw: str = ""):
             fid = await validar_vez(ctx, run)
             if fid is None:
                 return
+            if shikigami_da_vez(run):
+                await ctx.send("shikigami não descansa; use `!atacar`, `!usarh` ou `!passar`.")
+                return
             divisor, lugar = 20, "em combate"
         f = get_ficha_id(fid)
         vigor, vontade = maximos(f, {})
@@ -5865,8 +6850,60 @@ async def passar(ctx):
         fid = await validar_vez(ctx, run)
         if fid is None:
             return
+        shiki = shikigami_da_vez(run)
+        if shiki:
+            await fim_da_acao_shikigami(ctx, run, shiki, [f"⏭️ **{shiki['nome']}** passou a vez."])
+            return
         f = get_ficha_id(fid)
         await fim_da_acao(ctx, run, fid, [f"⏭️ **{f['nome']}** passou a vez."])
+
+
+@bot.command(name="observar")
+async def observar(ctx, *, raw: str = ""):
+    run = await obter_run(ctx)
+    if not run:
+        return
+    async with run["lock"]:
+        fid = await validar_vez(ctx, run)
+        if fid is None:
+            return
+        if shikigami_da_vez(run):
+            await ctx.send("shikigami não pode observar; use `!atacar`, `!usarh` ou `!passar`.")
+            return
+        if not raw.strip():
+            await ctx.send("uso: `!observar [inimigo]` (gasta o seu turno).")
+            return
+        _, alvo_ref = separar_alvo_dungeon(run, f"!observar {raw}")
+        if alvo_ref and alvo_ref[0] == "a":
+            await ctx.send("alvo ambiguo: " + ", ".join(f"**{nome}**" for nome in alvo_ref[1])
+                           + ". escreva mais do nome.")
+            return
+        if not alvo_ref or alvo_ref[0] != "m":
+            await ctx.send("informe um inimigo pelo nome ou pelo numero exibido no painel.")
+            return
+        indice = alvo_ref[1]
+        monstro = run["inimigos"][indice]
+        if not inimigo_vivo(monstro):
+            await ctx.send("esse inimigo ja foi derrotado ou fugiu.")
+            return
+
+        ficha = get_ficha_id(fid)
+        rolagem_observar = rolar_attr(ficha, "sabedoria")
+        nivel = nivel_observacao(rolagem_observar["total"])
+        observacoes = run.setdefault("observacoes", {})
+        nivel_anterior = observacoes.get(indice, 0)
+        cabecalho = (
+            f"🔎 **{ficha['nome']}** observa **{monstro['nome']}**: "
+            f"SAB {_t(rolagem_observar)}"
+        )
+        if nivel == 0:
+            linhas = [cabecalho + " → não encontrou pistas úteis."]
+        elif nivel <= nivel_anterior:
+            linhas = [cabecalho + " → nenhuma informação nova; o que já foi descoberto permanece."]
+        else:
+            observacoes[indice] = nivel
+            linhas = [cabecalho + " → " + "; ".join(detalhes_observacao_monstro(monstro, nivel)) + "."]
+        await fim_da_acao(ctx, run, fid, linhas)
 
 
 @bot.command(name="fugir")
@@ -5877,6 +6914,9 @@ async def fugir(ctx):
     async with run["lock"]:
         fid = await validar_vez(ctx, run)
         if fid is None:
+            return
+        if shikigami_da_vez(run):
+            await ctx.send("shikigami não foge da Dungeon; use `!atacar`, `!usarh` ou `!passar`.")
             return
         f = get_ficha_id(fid)
         eu = rolar_attr(f, "agilidade")

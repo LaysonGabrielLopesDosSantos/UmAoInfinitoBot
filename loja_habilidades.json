@@ -232,6 +232,169 @@
       "preco": 175,
       "requisitos": {"combate": 3},
       "custos": {"mente": 4}
+    },
+    {
+      "nome": "Invasão Mental",
+      "descricao": "Ataca diretamente a mente do inimigo. A disputa usa inteligência contra sabedoria, sem teste de precisão.",
+      "bonus": {"inteligencia": 2},
+      "duracao": 1,
+      "modo": "mental",
+      "preco": 180,
+      "requisitos": {"inteligencia": 3},
+      "custos": {"mente": 4}
+    },
+    {
+      "nome": "Medo Devastador",
+      "descricao": "Projeta um terror esmagador que causa dano apenas à mente. Usa inteligência contra sabedoria, sem teste de precisão.",
+      "bonus": {"inteligencia": 4},
+      "duracao": 1,
+      "modo": "mental",
+      "preco": 240,
+      "requisitos": {"inteligencia": 5},
+      "custos": {"mente": 6}
+    },
+    {
+      "nome": "Invocação: Cão de Jade",
+      "descricao": "Invoca um guardião leal que protege o invocador e luta sob comando.",
+      "invocacao": "Cão de Jade",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 160,
+      "requisitos": {"sabedoria": 2},
+      "custos": {"mente": 4}
+    },
+    {
+      "nome": "Invocação: Corvo de Tinta",
+      "descricao": "Invoca um batedor independente que ataca de longe e marca uma presa.",
+      "invocacao": "Corvo de Tinta",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 170,
+      "requisitos": {"inteligencia": 2},
+      "custos": {"mente": 4}
+    },
+    {
+      "nome": "Invocação: Serpente de Nuvem",
+      "descricao": "Invoca uma serpente espiritual que restaura o corpo de um aliado.",
+      "invocacao": "Serpente de Nuvem",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 190,
+      "requisitos": {"sabedoria": 3},
+      "custos": {"mente": 5}
+    },
+    {
+      "nome": "Invocação: Raposa do Eclipse",
+      "descricao": "Invoca uma ilusionista imprevisível que alterna entre ataque e auxílio.",
+      "invocacao": "Raposa do Eclipse",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 195,
+      "requisitos": {"inteligencia": 3},
+      "custos": {"mente": 5}
+    },
+    {
+      "nome": "Invocação: Golem de Basalto",
+      "descricao": "Invoca um protetor robusto de atributos fixos, controlado pelo invocador.",
+      "invocacao": "Golem de Basalto",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 210,
+      "requisitos": {"sabedoria": 3},
+      "custos": {"mente": 6}
+    },
+    {
+      "nome": "Invocação: Cervo da Aurora",
+      "descricao": "Invoca um curandeiro espiritual que recupera a mente de um aliado.",
+      "invocacao": "Cervo da Aurora",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 220,
+      "requisitos": {"sabedoria": 4},
+      "custos": {"mente": 6}
+    },
+    {
+      "nome": "Invocação: Lebre do Trovão",
+      "descricao": "Invoca uma atacante veloz e independente, especializada em golpes elétricos.",
+      "invocacao": "Lebre do Trovão",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 200,
+      "requisitos": {"inteligencia": 3},
+      "custos": {"mente": 5}
+    },
+    {
+      "nome": "Invocação: Aranha do Véu",
+      "descricao": "Invoca uma caçadora independente que enfraquece e envenena seus alvos.",
+      "invocacao": "Aranha do Véu",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 225,
+      "requisitos": {"inteligencia": 4},
+      "custos": {"mente": 6}
+    },
+    {
+      "nome": "Invocação: Tigre de Brasa",
+      "descricao": "Invoca um atacante feroz que luta sob comando e deixa queimaduras.",
+      "invocacao": "Tigre de Brasa",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 240,
+      "requisitos": {"inteligencia": 3},
+      "custos": {"mente": 7}
+    },
+    {
+      "nome": "Invocação: Guardião do Sino",
+      "descricao": "Invoca um espírito que fortalece aliados ou ataca com ondas sonoras.",
+      "invocacao": "Guardião do Sino",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 250,
+      "requisitos": {"sabedoria": 4, "inteligencia": 3},
+      "custos": {"mente": 7}
+    },
+    {
+      "nome": "Invocação: Oni Escarlate",
+      "descricao": "Invoca um oni devastador e descontrolado. Com menos de 18 de inteligência, atacará qualquer combatente aleatoriamente.",
+      "invocacao": "Oni Escarlate",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 360,
+      "requisitos": {"inteligencia": 8},
+      "custos": {"mente": 10}
+    },
+    {
+      "nome": "Invocação: Dragão do Abismo",
+      "descricao": "Invoca um dragão arcano poderoso e descontrolado. Com menos de 18 de inteligência, atacará qualquer combatente aleatoriamente.",
+      "invocacao": "Dragão do Abismo",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 400,
+      "requisitos": {"sabedoria": 8},
+      "custos": {"mente": 12}
+    },
+    {
+      "nome": "Invocação: Quimera Rubra",
+      "descricao": "Invoca uma fera híbrida extremamente veloz e descontrolada. Com menos de 18 de inteligência, atacará qualquer combatente aleatoriamente.",
+      "invocacao": "Quimera Rubra",
+      "bonus": {},
+      "duracao": null,
+      "modo": "shikigami",
+      "preco": 420,
+      "requisitos": {"inteligencia": 6, "sabedoria": 6},
+      "custos": {"mente": 11}
     }
   ]
 }
