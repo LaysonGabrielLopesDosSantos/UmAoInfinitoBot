@@ -62,6 +62,17 @@ SIG = {**ATRIBUTOS, "corpo": "crp", "mente": "mnt"}
 VITAIS = {"corpo": "corpo", "crp": "corpo", "mente": "mente", "mnt": "mente"}
 # atributos afetados pela penalidade de mente
 MENTAIS = {"combate", "inteligencia", "sabedoria", "carisma", "precisao"}
+CONDICOES = {
+    "veneno": {"nome": "Veneno", "tipo": "dano"},
+    "queimadura": {"nome": "Queimadura", "tipo": "dano"},
+    "sangramento": {"nome": "Sangramento", "tipo": "dano"},
+    "congelamento": {"nome": "Congelamento", "tipo": "incapacitante", "chance": 100},
+    "paralisia": {"nome": "Paralisia", "tipo": "incapacitante", "chance": 50},
+}
+ICONE_CONDICAO = {
+    "veneno": "☠️", "queimadura": "🔥", "sangramento": "🩸",
+    "congelamento": "🧊", "paralisia": "⚡",
+}
 TIPOS_ITEM = {
     "normal": "estatico",
     "estatico": "estatico",
@@ -93,6 +104,43 @@ def nome_tipo_item(tipo: str) -> str:
 
 def nome_tipo_habilidade(modo: str) -> str:
     return {"buff": "melhoria (mel)", "debuff": "penalidade (pen)"}.get(modo, modo)
+
+
+def validar_efeitos_habilidade(efeitos, nome: str) -> list:
+    if not isinstance(efeitos, list):
+        raise ValueError(f"efeitos invalidos na habilidade **{nome}**; use uma lista.")
+    resultado = []
+    for efeito in efeitos:
+        if not isinstance(efeito, dict) or set(efeito) - {"tipo", "intensidade", "duracao", "chance"}:
+            raise ValueError(f"efeito invalido na habilidade **{nome}**.")
+        tipo = norm(efeito.get("tipo", ""))
+        if tipo not in CONDICOES:
+            raise ValueError(f"condicao invalida na habilidade **{nome}**: {tipo or 'vazia'}.")
+        intensidade = efeito.get("intensidade", 1)
+        duracao = efeito.get("duracao")
+        chance = efeito.get("chance", CONDICOES[tipo].get("chance", 100))
+        if type(intensidade) is not int or not 1 <= intensidade <= 20:
+            raise ValueError(f"intensidade invalida na habilidade **{nome}**; use um valor de 1 a 20.")
+        if type(duracao) is not int or not 1 <= duracao <= 10:
+            raise ValueError(f"duracao invalida na habilidade **{nome}**; use um valor de 1 a 10.")
+        if type(chance) is not int or not 1 <= chance <= 100:
+            raise ValueError(f"chance invalida na habilidade **{nome}**; use um valor de 1 a 100.")
+        resultado.append({
+            "tipo": tipo, "intensidade": intensidade, "duracao": duracao, "chance": chance,
+        })
+    return resultado
+
+
+def texto_efeitos_condicao(efeitos: list) -> str:
+    return "; ".join(
+        f"{CONDICOES[efeito['tipo']]['nome']} "
+        + (f"{efeito['intensidade']} de dano/turno" if CONDICOES[efeito["tipo"]]["tipo"] == "dano"
+           else "perde a ação" if efeito["tipo"] == "congelamento"
+           else "50% de chance de perder a ação")
+        + f" por {efeito['duracao']} turno(s)"
+        + (f" · chance {efeito['chance']}%" if efeito["chance"] < 100 else "")
+        for efeito in efeitos
+    )
 
 
 # banco de dados (com migracao automatica)
@@ -180,6 +228,8 @@ CREATE TABLE IF NOT EXISTS habilidades (
     ativa INTEGER NOT NULL DEFAULT 0,
     restam INTEGER,
     modo TEXT NOT NULL DEFAULT 'buff',
+    custos TEXT NOT NULL DEFAULT '{}',
+    efeitos TEXT NOT NULL DEFAULT '[]',
     UNIQUE (ficha_id, nome)
 );
 CREATE TABLE IF NOT EXISTS lixeira (
@@ -259,6 +309,8 @@ def preparar_banco():
         ("itens", "vendaveis", "INTEGER NOT NULL DEFAULT 0"),
         ("habilidades", "mental", "INTEGER NOT NULL DEFAULT 0"),
         ("habilidades", "requisitos", "TEXT NOT NULL DEFAULT '{}'"),
+        ("habilidades", "custos", "TEXT NOT NULL DEFAULT '{}'"),
+        ("habilidades", "efeitos", "TEXT NOT NULL DEFAULT '[]'"),
     ):
         garantir_coluna(tabela, coluna, definicao)
 
@@ -489,6 +541,81 @@ def get_habilidade(ficha_id, nome, exato=False, seguro=False):
                       exato=exato, seguro=seguro)
 
 
+def aplicar_condicao(alvo, efeito: dict, origem=None) -> bool:
+    if random.randint(1, 100) > efeito.get("chance", 100):
+        return False
+    tipo = efeito["tipo"]
+    nome = f"Condição: {CONDICOES[tipo]['nome']}"
+    if isinstance(alvo, dict):
+        efeitos = alvo.setdefault("efeitos", [])
+        existente = next((e for e in efeitos if e.get("condicao") == tipo), None)
+        novo = {
+            "nome": nome, "condicao": tipo, "intensidade": efeito["intensidade"],
+            "duracao": efeito["duracao"], "origem": origem,
+        }
+        if existente:
+            existente["intensidade"] = max(existente.get("intensidade", 1), novo["intensidade"])
+            existente["duracao"] = max(existente.get("duracao") or 0, novo["duracao"])
+            existente["origem"] = origem or existente.get("origem")
+        else:
+            efeitos.append(novo)
+        return True
+
+    nome_existente = db.execute(
+        "SELECT * FROM status WHERE ficha_id=? AND nome=?", (alvo["id"], nome)
+    ).fetchone()
+    bonus = {"tipo": tipo, "intensidade": efeito["intensidade"]}
+    duracao = efeito["duracao"]
+    if nome_existente:
+        antigo = json.loads(nome_existente["bonus"])
+        bonus["intensidade"] = max(antigo.get("intensidade", 1), bonus["intensidade"])
+        duracao = max(nome_existente["duracao"] or 0, duracao)
+        db.execute(
+            "UPDATE status SET tipo='condicao', bonus=?, duracao=? WHERE id=?",
+            (json.dumps(bonus), duracao, nome_existente["id"]),
+        )
+    else:
+        db.execute(
+            "INSERT INTO status (ficha_id, nome, tipo, bonus, duracao) VALUES (?, ?, 'condicao', ?, ?)",
+            (alvo["id"], nome, json.dumps(bonus), duracao),
+        )
+    db.commit()
+    return True
+
+
+def texto_aplicacao_condicoes(alvo, efeitos: list, origem=None) -> list:
+    linhas = []
+    for efeito in efeitos:
+        if aplicar_condicao(alvo, efeito, origem):
+            rotulo = CONDICOES[efeito["tipo"]]["nome"]
+            linhas.append(f"🧪 {rotulo} aplicado por {efeito['duracao']} turno(s).")
+    return linhas
+
+
+def condicao_impede_acao(efeitos: list):
+    for efeito in efeitos:
+        tipo = efeito.get("condicao", efeito.get("tipo"))
+        definicao = CONDICOES.get(tipo)
+        if not definicao or definicao["tipo"] != "incapacitante":
+            continue
+        chance = definicao["chance"]
+        if random.randint(1, 100) <= chance:
+            return definicao["nome"]
+    return None
+
+
+EFEITOS_ATAQUES_MONSTRO = {
+    "faisca sombria": {"tipo": "queimadura", "intensidade": 2, "duracao": 2, "chance": 40},
+    "toque gelido": {"tipo": "congelamento", "intensidade": 1, "duracao": 1, "chance": 30},
+    "pancada podre": {"tipo": "veneno", "intensidade": 2, "duracao": 2, "chance": 30},
+    "poeira da loucura": {"tipo": "paralisia", "intensidade": 1, "duracao": 2, "chance": 35},
+    "picada": {"tipo": "veneno", "intensidade": 2, "duracao": 2, "chance": 45},
+    "ferroada": {"tipo": "veneno", "intensidade": 3, "duracao": 2, "chance": 40},
+    "chama profana": {"tipo": "queimadura", "intensidade": 3, "duracao": 2, "chance": 40},
+    "raio de runas": {"tipo": "paralisia", "intensidade": 1, "duracao": 1, "chance": 35},
+}
+
+
 def migrar_habilidades_ativas():
     """so roda uma vez, quando a coluna 'ativa' acabou de ser criada: o status estatico com o nome
     de uma habilidade (a forma antiga de 'ativa') vira a propria habilidade ativa."""
@@ -677,7 +804,9 @@ def serializar_ficha(f) -> dict:
                    for r in db.execute("SELECT * FROM status WHERE ficha_id=?", (fid,))]
     d["notas"] = [{k: r[k] for k in ("titulo", "texto")}
                   for r in db.execute("SELECT * FROM notas WHERE ficha_id=?", (fid,))]
-    d["habilidades"] = [{k: r[k] for k in ("nome", "bonus", "duracao", "ativa", "restam", "modo", "mental", "requisitos")}
+    d["habilidades"] = [{k: r[k] for k in (
+        "nome", "bonus", "duracao", "ativa", "restam", "modo", "mental", "requisitos", "custos", "efeitos",
+    )}
                         for r in db.execute("SELECT * FROM habilidades WHERE ficha_id=?", (fid,))]
     return d
 
@@ -717,7 +846,8 @@ def embed_ficha(f) -> discord.Embed:
         xp_txt = f"{f['exp']}/{100 * f['nivel']}"
     emb.add_field(name="✨ xp", value=xp_txt, inline=True)
     emb.add_field(name="💰 moedas", value=f"{f['moedas']}", inline=True)
-    eq = [f"{r['nome']} ({r['equipado']}/{r['quantidade']})" if r["quantidade"] > 1 else r["nome"]
+    eq = [f"{nome_exibicao_item(r['nome'])} ({r['equipado']}/{r['quantidade']})"
+          if r["quantidade"] > 1 else nome_exibicao_item(r["nome"])
           for r in db.execute("SELECT nome, equipado, quantidade FROM itens WHERE ficha_id=? AND equipado>0",
                               (f["id"],))]
     st = [r["nome"] for r in db.execute("SELECT nome FROM status WHERE ficha_id=?", (f["id"],))]
@@ -1000,17 +1130,18 @@ AJUDA = [
     ("combate", "turno", "!turno [pers1, pers2, ...]", "passa o turno: aplica status dinamicos e reduz a duracao de status e habilidades", "!turno Kage, Douma"),
     ("itens", "inventario", "!inventario [pers]", "mostra o inventario", ""),
     ("itens", "pegar", "!pegar [pers] [item] [qtd] [tipo] [+sigla,-sigla] [valores]", "adiciona item; tipo normal (equipavel, da bonus) ou consumível (efeito em crp/mnt ao usar); valores aceitam %", "!pegar espada 1 normal +for,-agi 3,1"),
-    ("itens", "descartar", "!descartar [pers] [item] [qtd]", "remove o item (ou so a quantidade informada); exige o nome ou pelo menos 3 letras do comeco", "!descartar pocao 2"),
+    ("itens", "descartar", "!descartar [pers] [item] [qtd]", "remove o item (ou so a quantidade informada); exige o nome ou pelo menos 3 letras do comeco", "!descartar poção 2"),
     ("itens", "equipar", "!equipar [pers] [item]", "equipa uma unidade do item (o bonus soma por unidade)", "!equipar espada"),
     ("itens", "desequipar", "!desequipar [pers] [item]", "tira uma unidade equipada", "!desequipar espada"),
     ("itens", "equipados", "!equipados [pers]", "mostra os itens equipados e o bonus total", ""),
-    ("itens", "usaritem", "!usaritem [pers] [item]", "usa um consumível: gasta uma unidade e aplica o efeito em corpo/mente", "!usaritem pocao"),
+    ("itens", "usaritem", "!usaritem [pers] [item]", "usa um consumível: gasta uma unidade e aplica o efeito em corpo/mente", "!usaritem poção"),
     ("itens", "renomearitem", "!renomearitem [pers] [item] [novo nome]", "troca o nome do item", ""),
-    ("itens", "transferir", "!transferir [pers] [item] [qtd|tudo] [destino]", "passa itens de uma ficha sua para outra ficha (de qualquer jogador); dentro da dungeon so entre o mesmo grupo e fora do combate", "!transferir \"Pocao de Cura\" 2 Douma"),
+    ("itens", "transferir", "!transferir [pers] [item] [qtd|tudo] [destino]", "passa itens de uma ficha sua para outra ficha (de qualquer jogador); dentro da dungeon so entre o mesmo grupo e fora do combate", "!transferir \"Poção de Cura\" 2 Douma"),
     ("economia", "saldo", "!saldo [pers]", "mostra as moedas da ficha; elas vem das dungeons, dos eventos e das vendas", ""),
     ("economia", "pix", "!pix [pers] [moedas] [destino]", "transfere moedas para outra ficha; dentro da dungeon, so entre o mesmo grupo e fora do combate", "!pix Kage 50 Douma"),
-    ("economia", "loja", "!loja [itens|habilidades]", "mostra os itens da loja, as habilidades disponiveis ou o catalogo completo", "!loja habilidades"),
-    ("economia", "comprar", "!comprar [pers] [item|habilidade] [qtd]", "compra um item (com quantidade) ou aprende uma habilidade da loja; nao funciona dentro de dungeon", "!comprar pocao de cura 3"),
+    ("economia", "loja", "!loja [itens|habilidades]", "mostra os itens ou habilidades disponiveis na loja", "!loja habilidades"),
+    ("economia", "info", "!info [item|habilidade]", "mostra efeito, custo e requisitos de um item ou habilidade da loja", "!info Foco de Batalha"),
+    ("economia", "comprar", "!comprar [pers] [item|habilidade] [qtd]", "compra um item (com quantidade) ou aprende uma habilidade da loja; nao funciona dentro de dungeon", "!comprar poção de cura 3"),
     ("economia", "vender", "!vender [pers] [item] [qtd|tudo]", "vende pela metade do preco; so itens comprados ou achados nas dungeons/eventos (nao os criados com !pegar)", "!vender espada de ferro"),
     ("economia", "darmoedas", "!darmoedas [pers] [quantidade]", "admin: da (ou tira, com -) moedas de uma ficha", "!darmoedas kage 200"),
     ("itens", "limpar", "!limpar [pers]", "apaga todos os itens do inventario (pede confirmacao; da para desfazer)", ""),
@@ -1020,7 +1151,7 @@ AJUDA = [
     ("status", "renomearstatus", "!renomearstatus [pers] [nome] [novo nome]", "troca o nome do status", ""),
     ("habilidades", "ch", "!ch [pers] [nome] [+sigla,-sigla] [valores] [persistente|turnos]", "cria habilidade; sem duracao vale so o turno atual; crp/mnt tem efeito imediato ao usar; valores aceitam % (+crp 50% = metade do vigor; +for 20% = 20% do atributo); int causa dano fisico", "!ch Kage CorteLinear +for,+agi 2,5"),
     ("habilidades", "habilidades", "!habilidades [pers]", "lista as habilidades e quais estao ativas; habilidades da loja sao aprendidas com !comprar", ""),
-    ("habilidades", "usarh", "!usarh [pers] [habilidade] [alvo opcional]", "ativa a habilidade; na dungeon, melhoria (mel, incluindo cura) pode mirar aliado e penalidade (pen) inimigo; cura/vital e imediata, bonus de atributo dura o tempo definido", "!usarh Cura Douma"),
+    ("habilidades", "usarh", "!usarh [pers] [habilidade] [alvo opcional]", "ativa a habilidade; na dungeon, o alvo aceita o nome completo ou o comeco do nome, ignorando maiusculas e acentos; melhoria (mel) mira aliado e penalidade (pen) inimigo", "!usarh Foco de Batalha dou"),
     ("habilidades", "desativarh", "!desativarh [pers] [habilidade]", "desativa uma habilidade ativa", ""),
     ("habilidades", "apagarh", "!apagarh [pers] [habilidade]", "apaga a habilidade; exige o nome ou pelo menos 3 letras do comeco", ""),
     ("habilidades", "renomearh", "!renomearh [pers] [habilidade] [novo nome]", "troca o nome da habilidade", ""),
@@ -1032,7 +1163,7 @@ AJUDA = [
     ("notas", "queimar", "!queimar [pers]", "apaga todas as notas (pede confirmacao; da para desfazer)", ""),
     ("xp", "xp", "!xp [pers]", "mostra o nivel e o xp da ficha; xp vem das dungeons e cada nivel pede 100 x nivel de xp (ficha em nivel livre nao usa xp)", "!xp kage"),
     ("xp", "upar", "!upar [pers] [quantidade]", "admin: da (ou tira, com -) xp a uma ficha; sobe de nivel sozinho", "!upar kage 150"),
-    ("dungeon", "dungeon", "!dungeon", "mostra as dificuldades, os temas e os comandos; **corpo em 0 = a ficha e apagada para sempre**", ""),
+    ("dungeon", "dungeon", "!dungeon", "mostra dificuldades, temas e comandos; corpo em 0 ou todo o grupo desmaiado causa morte permanente", ""),
     ("dungeon", "dungeon criar", "!dungeon criar [facil|medio|dificil|pesadelo] [caverna|cripta|floresta|ruinas] [ficha]", "abre uma dungeon no canal; niveis sugeridos: facil 1-5, medio 6-10, dificil 11-15, pesadelo 16-20. qualquer ficha pode entrar em qualquer uma; inimigos acompanham o nivel medio do grupo; pede confirmacao por causa da morte permanente", "!dungeon criar dificil cripta kage"),
     ("dungeon", "dungeon entrar", "!dungeon entrar [ficha]", "entra no grupo antes do inicio (ate 4 jogadores, uma ficha por pessoa; qualquer nivel pode entrar em qualquer dificuldade)", "!dungeon entrar douma"),
     ("dungeon", "dungeon iniciar", "!dungeon iniciar", "o lider comeca a dungeon (pode ser solo)", ""),
@@ -1043,7 +1174,7 @@ AJUDA = [
     ("dungeon", "escolher", "!escolher [numero ou opcao]", "em eventos de grupo, todos votam e o efeito atinge o grupo; em eventos individuais, apenas o explorador indicado escolhe e recebe o efeito", "!escolher examinar"),
     ("dungeon", "ranking", "!ranking [abates|mvp|dano|vitorias]", "ranking do servidor somando todas as dungeons", "!ranking mvp"),
     ("dungeon", "atacar", "!atacar [alvo] [tipo ou habilidade]", "Informe o tipo do ataque (perto, longe, magia ou jujutsu) ou o nome de uma habilidade de ataque para usar o tipo dela automaticamente. Perto: combate+for; longe: precisao+for+metade da int; magia: precisao+int; jujutsu: combate+for+metade da int. Metade da int arredonda para baixo e todo dano tira corpo.", "!atacar 2 Punho de Ruptura"),
-    ("dungeon", "usar", "!usar [consumível] [alvo aliado opcional]", "gasta a vez usando um consumível da sua ficha; pode aplicar em qualquer aliado do grupo", "!usar \"Pocao de Cura\" Douma"),
+    ("dungeon", "usar", "!usar [consumível] [alvo aliado opcional]", "gasta a vez usando um consumível da sua ficha; pode aplicar em qualquer aliado do grupo", "!usar \"Poção de Cura\" Douma"),
     ("dungeon", "descansar", "!descansar [crp|mnt]", "em combate gasta a vez e recupera vigor/20 (ou vontade/20); no acampamento recupera 20%, uma vez por pessoa", "!descansar mnt"),
     ("dungeon", "fugir", "!fugir", "foge so da batalha (a dungeon continua): rola agilidade contra o inimigo mais agil e so falha se perder por mais de 4; "
      "quem foge fica sem a recompensa do andar e volta no acampamento; se todos fugirem o andar e refeito", ""),
@@ -1065,7 +1196,7 @@ for i, entrada in enumerate(AJUDA):
     elif entrada[1] == "usaritem":
         AJUDA[i] = (
             entrada[0], entrada[1], "!usaritem [pers] [item] [alvo opcional do grupo]",
-            "usa um consumível; na dungeon pode aplicar em qualquer aliado do grupo", "!usaritem pocao Douma",
+            "usa um consumível; na dungeon pode aplicar em qualquer aliado do grupo", "!usaritem poção Douma",
         )
 CATEGORIAS = ["fichas", "atributos", "xp", "combate", "dungeon", "itens", "economia", "status", "habilidades",
               "notas", "seguranca", "admin"]
@@ -1348,8 +1479,10 @@ async def copiarficha(ctx, *, raw: str = ""):
                "SELECT ?, nome, tipo, bonus, duracao FROM status WHERE ficha_id=?", (novo_id, f["id"]))
     db.execute("INSERT INTO notas (ficha_id, titulo, texto) "
                "SELECT ?, titulo, texto FROM notas WHERE ficha_id=?", (novo_id, f["id"]))
-    db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos) "
-               "SELECT ?, nome, bonus, duracao, ativa, restam, modo, mental, requisitos FROM habilidades WHERE ficha_id=?",
+    db.execute("INSERT INTO habilidades "
+               "(ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos) "
+               "SELECT ?, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos "
+               "FROM habilidades WHERE ficha_id=?",
                (novo_id, f["id"]))
     db.commit()
     renumerar(ctx.guild.id, dono.id)
@@ -1587,9 +1720,9 @@ async def vida(ctx, *, raw: str = ""):
            f"corpo: **{f['corpo']}/{vigor}** (penalidade em todos os atributos: −{pc})\n"
            f"mente: **{f['mente']}/{vontade}** (penalidade extra nos mentais: −{pm})")
     if f["corpo"] == 0:
-        msg += "\n💀 corpo em 0: desmaiado ou morto, conforme o contexto."
+        msg += "\n💀 corpo em 0: morto na dungeon."
     if f["mente"] == 0:
-        msg += "\n🌀 mente em 0."
+        msg += "\n🌀 mente em 0: desmaiado."
     await ctx.send(msg)
 
 
@@ -1646,12 +1779,18 @@ async def rolar_habilidade(ctx, f, hab, attr):
         dica = ("ela define: " + fmt_bonus(definidos)) if definidos else "ela so tem efeito imediato (crp/mnt), nao ha o que rolar"
         await ctx.send(f"**{hab['nome']}** nao tem valor em {ATRIBUTOS[attr]}; {dica}.")
         return
+    erro_uso = validar_uso_habilidade(f, hab)
+    if erro_uso:
+        await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
+        return
     base = valor_bonus(bruto, f[attr])
     r = rolar_attr(f, attr, base=base, com_bonus=False)
+    custo = pagar_custo_habilidade(f, hab)
     rotulo = f"{hab['nome']} {ATRIBUTOS[attr]}" + (f" {bruto}" if isinstance(bruto, str) else "")
     aviso = "\n💀 corpo em 0!" if f["corpo"] == 0 else ""
     await ctx.send(f"🎲 **{f['nome']}** — habilidade {hab['nome']} ({ATRIBUTOS[attr]}): "
-                   f"{texto_rolagem(attr, r, rotulo_base=rotulo)} = **{r['total']}**{aviso}")
+                   f"{texto_rolagem(attr, r, rotulo_base=rotulo)} = **{r['total']}**{aviso}"
+                   + (("\n" + "\n".join(custo)) if custo else ""))
 
 
 @bot.command(name="d20")
@@ -1709,12 +1848,19 @@ async def d20(ctx, *, raw: str = ""):
         if hab["ativa"]:
             nota = f"\n({hab['nome']} ja esta ativa, entao o bonus ja entra em todas as rolagens)"
         elif bonus_hab:
+            erro_uso = validar_uso_habilidade(f, hab)
+            if erro_uso:
+                await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
+                return
             extra = bonus_hab
         else:
             nota = f"\n({hab['nome']} nao altera {ATRIBUTOS[attr]})"
     r = rolar_attr(f, attr, extra)
+    custo = pagar_custo_habilidade(f, hab) if len(resto) == 2 and not nota and extra and hab else []
     aviso = "\n💀 corpo em 0!" if f["corpo"] == 0 else ""
-    await ctx.send(f"🎲 **{f['nome']}** — {ATRIBUTOS[attr]}: {texto_rolagem(attr, r, nome_hab)} = **{r['total']}**{aviso}{nota}")
+    await ctx.send(f"🎲 **{f['nome']}** — {ATRIBUTOS[attr]}: "
+                   f"{texto_rolagem(attr, r, nome_hab)} = **{r['total']}**{aviso}{nota}"
+                   + (("\n" + "\n".join(custo)) if custo else ""))
 
 
 async def briga_de_rolagem(ctx, tokens):
@@ -1809,8 +1955,8 @@ async def dano(ctx, *, raw: str = ""):
             registrar_alvo(ctx, alvo)
             texto += f"\n**{alvo['nome']}** — {SIG[campo]}: {antes} → {novo}"
             if novo == 0:
-                texto += ("\n💀 corpo em 0: desmaiado ou morto, conforme o contexto." if campo == "corpo"
-                          else "\n🌀 mente em 0.")
+                texto += ("\n💀 corpo em 0: morto na dungeon." if campo == "corpo"
+                          else "\n🌀 mente em 0: desmaiado.")
     elif pontos:
         texto += "\n(so calculo. para aplicar, diga o personagem no fim: `!dano 20 res 12 kage`)"
     await ctx.send(texto)
@@ -1903,11 +2049,11 @@ async def inventario(ctx, *, raw: str = ""):
         bonus = fmt_bonus(json.loads(r["bonus"]))
         venda = f" · 💱 {r['vendaveis']} disponível(is) para venda" if r["vendaveis"] else ""
         if r["tipo"] == "consumivel":
-            linhas.append(f"🍖 **{r['nome']}** · consumível · quantidade: {r['quantidade']}\n"
+            linhas.append(f"🍖 **{nome_exibicao_item(r['nome'])}** · consumível · quantidade: {r['quantidade']}\n"
                           f"   Efeito: {bonus}{venda}")
         else:
             marca = "🟢" if r["equipado"] > 0 else "⚪"
-            linhas.append(f"{marca} **{r['nome']}** · normal · quantidade: {r['quantidade']} "
+            linhas.append(f"{marca} **{nome_exibicao_item(r['nome'])}** · normal · quantidade: {r['quantidade']} "
                           f"(equipados: {r['equipado']})\n   Bônus: {bonus}{venda}")
     await enviar_longo(
         ctx,
@@ -1928,7 +2074,7 @@ async def pegar(ctx, *, raw: str = ""):
         await ctx.send("uso: `!pegar [personagem] [item] [quantidade] [tipo] [+sigla,-sigla] [valores]`\n"
                        "tipo (opcional): normal ou consumível.\n"
                        "ex.: `!pegar \"espada longa\" 1 normal +for,-agi 3,1`\n"
-                       "ex.: `!pegar pocao 3 consumível +crp 20`")
+                       "ex.: `!pegar poção 3 consumível +crp 20`")
         return
     nome_item = resto[0][0].strip()
     erro_nome = validar_nome(nome_item)
@@ -1957,7 +2103,7 @@ async def pegar(ctx, *, raw: str = ""):
             return
     existente = get_item(f["id"], nome_item, exato=True)
     if existente and tipo and tipo != existente["tipo"]:
-        await ctx.send(f"**{existente['nome']}** ja existe como {nome_tipo_item(existente['tipo'])}. "
+        await ctx.send(f"**{nome_exibicao_item(existente['nome'])}** ja existe como {nome_tipo_item(existente['tipo'])}. "
                        "descarte o item e crie de novo para mudar o tipo.")
         return
     tipo_final = tipo or (existente["tipo"] if existente else "estatico")
@@ -1974,11 +2120,11 @@ async def pegar(ctx, *, raw: str = ""):
         nova = existente["quantidade"] + qtd
         db.execute("UPDATE itens SET quantidade=?, bonus=? WHERE id=?",
                    (nova, json.dumps(bonus) if bonus is not None else existente["bonus"], existente["id"]))
-        msg = f"➕ **{existente['nome']}** agora esta com x{nova} no inventario de **{f['nome']}**."
+        msg = f"➕ **{nome_exibicao_item(existente['nome'])}** agora esta com x{nova} no inventario de **{f['nome']}**."
     else:
         db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, tipo) VALUES (?, ?, ?, ?, ?)",
                    (f["id"], nome_item, qtd, json.dumps(bonus or {}), tipo_final))
-        msg = (f"🎒 **{nome_item}** x{qtd} [{nome_tipo_item(tipo_final)}] "
+        msg = (f"🎒 **{nome_exibicao_item(nome_item)}** x{qtd} [{nome_tipo_item(tipo_final)}] "
                f"({fmt_bonus(bonus or {})}) adicionado a **{f['nome']}**.")
     db.commit()
     await ctx.send(msg)
@@ -2009,10 +2155,10 @@ async def descartar(ctx, *, raw: str = ""):
         nova = item["quantidade"] - qtd
         db.execute("UPDATE itens SET quantidade=?, equipado=?, vendaveis=? WHERE id=?",
                    (nova, min(item["equipado"], nova), min(item["vendaveis"], nova), item["id"]))
-        msg = f"🗑️ **{f['nome']}** descartou {qtd}x **{item['nome']}** (restam {nova})."
+        msg = f"🗑️ **{f['nome']}** descartou {qtd}x **{nome_exibicao_item(item['nome'])}** (restam {nova})."
     else:
         db.execute("DELETE FROM itens WHERE id=?", (item["id"],))
-        msg = f"🗑️ item **{item['nome']}** removido de **{f['nome']}**."
+        msg = f"🗑️ item **{nome_exibicao_item(item['nome'])}** removido de **{f['nome']}**."
     db.commit()
     normalizar_vitais(f["id"])
     await ctx.send(msg)
@@ -2031,16 +2177,16 @@ async def equipar(ctx, *, raw: str = ""):
         await ctx.send(msg_nao_tem(f, "item", resto[0][0]))
         return
     if item["tipo"] != "estatico":
-        await ctx.send(f"**{item['nome']}** e consumível e nao se equipa. use `!usaritem`.")
+        await ctx.send(f"**{nome_exibicao_item(item['nome'])}** e consumível e nao se equipa. use `!usaritem`.")
         return
     if item["equipado"] >= item["quantidade"]:
-        await ctx.send(f"todas as {item['quantidade']} unidade(s) de **{item['nome']}** ja estao equipadas.")
+        await ctx.send(f"todas as {item['quantidade']} unidade(s) de **{nome_exibicao_item(item['nome'])}** ja estao equipadas.")
         return
     novo = item["equipado"] + 1
     db.execute("UPDATE itens SET equipado=? WHERE id=?", (novo, item["id"]))
     db.commit()
     normalizar_vitais(f["id"])
-    await ctx.send(f"⚔️ **{f['nome']}** equipou **{item['nome']}** ({novo}/{item['quantidade']} equipadas) — "
+    await ctx.send(f"⚔️ **{f['nome']}** equipou **{nome_exibicao_item(item['nome'])}** ({novo}/{item['quantidade']} equipadas) — "
                    f"{fmt_bonus(json.loads(item['bonus']))} por unidade.")
 
 
@@ -2057,13 +2203,13 @@ async def desequipar(ctx, *, raw: str = ""):
         await ctx.send(msg_nao_tem(f, "item", resto[0][0]))
         return
     if item["equipado"] < 1:
-        await ctx.send(f"**{item['nome']}** nao esta equipado.")
+        await ctx.send(f"**{nome_exibicao_item(item['nome'])}** nao esta equipado.")
         return
     novo = item["equipado"] - 1
     db.execute("UPDATE itens SET equipado=? WHERE id=?", (novo, item["id"]))
     db.commit()
     normalizar_vitais(f["id"])
-    await ctx.send(f"🎒 **{f['nome']}** desequipou **{item['nome']}** ({novo}/{item['quantidade']} equipadas).")
+    await ctx.send(f"🎒 **{f['nome']}** desequipou **{nome_exibicao_item(item['nome'])}** ({novo}/{item['quantidade']} equipadas).")
 
 
 @bot.command(name="equipados")
@@ -2075,7 +2221,7 @@ async def equipados(ctx, *, raw: str = ""):
     if not rows:
         await ctx.send(f"**{f['nome']}** nao tem itens equipados.")
         return
-    linhas = [f"⚔️ **{r['nome']}** {r['equipado']}/{r['quantidade']} equipada(s) — "
+    linhas = [f"⚔️ **{nome_exibicao_item(r['nome'])}** {r['equipado']}/{r['quantidade']} equipada(s) — "
               f"{fmt_bonus(json.loads(r['bonus']))} por unidade" for r in rows]
     await enviar_longo(ctx, f"**itens equipados de {f['nome']}**\n" + "\n".join(linhas)
                        + f"\n\n**total:** {fmt_bonus(get_bonus(f['id']))} (inclui status estatico)")
@@ -2105,13 +2251,17 @@ async def aplicar_item_consumivel(ctx, origem, item, alvo):
     registrar_alvo(ctx, alvo)
     efeito = "\n".join(linhas) if linhas else "sem efeito mecanico."
     quem = f" em **{alvo['nome']}**" if alvo["id"] != origem["id"] else ""
-    await ctx.send(f"🍖 **{origem['nome']}** usou **{item['nome']}**{quem} ({sobra}).\n{efeito}")
+    await ctx.send(f"🍖 **{origem['nome']}** usou **{nome_exibicao_item(item['nome'])}**{quem} ({sobra}).\n{efeito}")
 
 
 @bot.command(name="usaritem")
 async def usaritem(ctx, *, raw: str = ""):
     run = run_do_usuario(ctx.guild.id, ctx.author.id)
     comando_raw, alvo_ref = separar_alvo_dungeon(run, raw, inimigos=False) if run else (raw, None)
+    if alvo_ref and alvo_ref[0] == "a":
+        await ctx.send("alvo ambiguo: " + ", ".join(f"**{nome}**" for nome in alvo_ref[1])
+                       + ". escreva mais do nome.")
+        return
     if alvo_ref and (alvo_ref[0] != "j" or alvo_ref[1] not in run["jogadores"]):
         await ctx.send("itens so podem ser usados em fichas do seu grupo na dungeon.")
         return
@@ -2126,7 +2276,7 @@ async def usaritem(ctx, *, raw: str = ""):
         await ctx.send(msg_nao_tem(f, "item", resto[0][0]))
         return
     if item["tipo"] != "consumivel":
-        await ctx.send(f"**{item['nome']}** e normal. use `!equipar`.")
+        await ctx.send(f"**{nome_exibicao_item(item['nome'])}** e normal. use `!equipar`.")
         return
     alvo = get_ficha_id(alvo_ref[1]) if alvo_ref else f
     if alvo is None:
@@ -2176,7 +2326,7 @@ def mesmo_item(a, b_tipo, b_bonus) -> bool:
 @bot.command(name="transferir")
 async def transferir(ctx, *, raw: str = ""):
     uso = ("uso: `!transferir [personagem] [item] [qtd|tudo] [destino]`\n"
-           "ex.: `!transferir \"Pocao de Cura\" 2 Douma`")
+           "ex.: `!transferir \"Poção de Cura\" 2 Douma`")
     tokens = tokenizar(raw)
     if len(tokens) < 2:
         await ctx.send(uso)
@@ -2212,12 +2362,12 @@ async def transferir(ctx, *, raw: str = ""):
         return
     qtd = item["quantidade"] if qtd is None else qtd
     if qtd > item["quantidade"]:
-        await ctx.send(f"**{f['nome']}** tem so {item['quantidade']}x **{item['nome']}**.")
+        await ctx.send(f"**{f['nome']}** tem so {item['quantidade']}x **{nome_exibicao_item(item['nome'])}**.")
         return
     existente = get_item(dest["id"], item["nome"], exato=True)
     bonus = json.loads(item["bonus"])
     if existente and not mesmo_item(existente, item["tipo"], bonus):
-        await ctx.send(f"**{dest['nome']}** ja tem um item chamado **{existente['nome']}** com outro efeito. "
+        await ctx.send(f"**{dest['nome']}** ja tem um item chamado **{nome_exibicao_item(existente['nome'])}** com outro efeito. "
                        "renomeie um dos dois com `!renomearitem` antes de transferir.")
         return
     equip_antes = item["equipado"]
@@ -2231,7 +2381,7 @@ async def transferir(ctx, *, raw: str = ""):
     db.commit()
     normalizar_vitais(f["id"])
     normalizar_vitais(dest["id"])
-    msg = f"📦 **{f['nome']}** entregou {qtd}x **{item['nome']}** para **{dest['nome']}**."
+    msg = f"📦 **{f['nome']}** entregou {qtd}x **{nome_exibicao_item(item['nome'])}** para **{dest['nome']}**."
     sobra = item["quantidade"] - qtd
     if equip_antes > sobra:
         msg += f"\n(desequipou {equip_antes - max(0, sobra)} unidade(s) que estavam em uso.)"
@@ -2309,46 +2459,37 @@ async def darmoedas(ctx, *, raw: str = ""):
     await ctx.send(f"💰 **{f['nome']}** — moedas: {f['moedas']} → {novo}")
 
 
-def texto_loja(secao: str = "tudo") -> str:
+def texto_loja(secao: str) -> str:
     linhas = ["🏪 **Loja**"]
-    if secao in ("tudo", "itens"):
+    if secao == "itens":
         linhas += [
             "Compre itens com `!comprar [personagem] [item] [quantidade]`.",
             "Venda com `!vender [personagem] [item] [quantidade ou tudo]` · a loja paga metade do preço.",
             "",
-            "**Consumíveis** · usados para recuperar corpo ou mente",
+            "**Consumíveis**",
         ]
         for nome in CONSUMIVEIS:
             c = CATALOGO[nome]
-            linhas.append(f"• **{nome}** — {c['preco']} 💰 ({fmt_bonus(c['bonus'])})")
-        linhas += ["", "**Equipamentos** · o bônus aumenta conforme a raridade"]
-        for base, gen, attrs in EQUIPAMENTOS:
+            linhas.append(f"• **{nome}** — {c['preco']} 💰")
+        linhas += ["", "**Equipamentos**"]
+        for base, gen, _ in EQUIPAMENTOS:
             precos = []
             for t in range(3):
                 c = CATALOGO[nome_equip(base, gen, t)]
                 nivel = f" · nível mínimo {c['nivel']}" if c["nivel"] > 1 else ""
-                precos.append(f"  • {TIERS[t][0 if gen == 'm' else 1]} · {c['preco']} 💰"
-                              f" · bônus: {fmt_bonus(c['bonus'])}{nivel}")
+                precos.append(f"  • {TIERS[t][0 if gen == 'm' else 1]} · {c['preco']} 💰{nivel}")
             linhas.append(f"**{base}**\n" + "\n".join(precos))
-        linhas.append(f"Equipamentos lendários só aparecem nas dungeons. "
-                      f"A loja paga {PRECO_TIER[3] // 2} 💰 por eles.")
-    if secao == "tudo":
-        linhas.append("")
-    if secao in ("tudo", "habilidades"):
+        linhas.append("Veja os efeitos com `!info [item]`.")
+    if secao == "habilidades":
         linhas += [
-            "**Habilidades** · aprenda com `!comprar [personagem] [habilidade]` "
-            "(uma habilidade por compra)"
+            "Aprenda com `!comprar [personagem] [habilidade]` (uma por compra).",
         ]
         if HABILIDADES_LOJA:
             for habilidade in HABILIDADES_LOJA:
-                linhas.append(
-                    f"• **{habilidade['nome']}** · {habilidade['preco']} 💰\n"
-                    f"  Efeito: {fmt_bonus(habilidade['bonus'])} · "
-                    f"Duração: {fmt_duracao_hab(habilidade['bonus'], habilidade['duracao'])} · "
-                    f"Tipo: {nome_tipo_habilidade(habilidade['modo'])}"
-                )
+                linhas.append(f"• **{habilidade['nome']}** — {habilidade['preco']} 💰")
         else:
             linhas.append("• Nenhuma habilidade disponível no momento.")
+        linhas.append("Veja efeitos, custos e requisitos com `!info [habilidade]`.")
     return "\n".join(linhas)
 
 
@@ -2358,7 +2499,63 @@ async def loja(ctx, *, raw: str = ""):
     if secao not in ("", "itens", "habilidades"):
         await ctx.send("Escolha uma seção: `!loja itens` ou `!loja habilidades`.")
         return
-    await enviar_longo(ctx, texto_loja(secao or "tudo"))
+    if not secao:
+        await ctx.send("🏪 **Loja**\nEscolha uma seção: `!loja itens` ou `!loja habilidades`.")
+        return
+    await enviar_longo(ctx, texto_loja(secao))
+
+
+@bot.command(name="info")
+async def info_loja(ctx, *, raw: str = ""):
+    nome = raw.strip().strip(ASPAS).strip()
+    if not nome:
+        await ctx.send("uso: `!info [item ou habilidade]`.")
+        return
+
+    itens = [dict(item, categoria="item") for item in CATALOGO.values() if item["na_loja"]]
+    habilidades = [dict(habilidade, categoria="habilidade") for habilidade in HABILIDADES_LOJA]
+    ofertas = itens + habilidades
+    alvo = achar_nome(ofertas, nome)
+    if not alvo:
+        candidatos = candidatos_nome(ofertas, nome)
+        if candidatos:
+            await ctx.send("qual deles? " + ", ".join(f"**{c['nome']}**" for c in candidatos[:8]))
+        else:
+            await ctx.send(f"nao encontrei **{nome}** na loja. veja `!loja itens` ou `!loja habilidades`.")
+        return
+
+    if alvo["categoria"] == "habilidade":
+        custos = alvo.get("custos", {})
+        requisitos = alvo.get("requisitos", {})
+        linhas = [
+            f"📖 **{alvo['nome']}** · habilidade",
+            alvo.get("descricao") or "Habilidade com o efeito indicado abaixo.",
+            f"Efeito: {fmt_bonus(alvo['bonus'])} · duração: "
+            f"{fmt_duracao_hab(alvo['bonus'], alvo['duracao'])}",
+            f"Tipo: {nome_tipo_habilidade(alvo['modo'])} · preço: {alvo['preco']} 💰",
+        ]
+        if custos:
+            linhas.append("Custo: " + " · ".join(f"-{valor} {SIG[vital]}" for vital, valor in custos.items()))
+        if requisitos:
+            linhas.append("Requisitos: " + " · ".join(
+                f"{ATRIBUTOS[atributo]} ≥ {valor}" for atributo, valor in requisitos.items()
+            ))
+        else:
+            linhas.append("Requisitos: nenhum.")
+        if alvo.get("efeitos"):
+            linhas.append("Condições: " + texto_efeitos_condicao(alvo["efeitos"]) + ".")
+        linhas.append(f"Compre com `!comprar [personagem] {alvo['nome']}`.")
+        await enviar_longo(ctx, "\n".join(linhas))
+        return
+
+    linhas = [f"🛍️ **{alvo['nome']}** · item", f"Preço: {alvo['preco']} 💰"]
+    if alvo["tipo"] == "consumivel":
+        linhas.append(f"Uso: consumível · efeito: {fmt_bonus(alvo['bonus'])}")
+    else:
+        nivel = f" · nível mínimo {alvo['nivel']}" if alvo["nivel"] > 1 else ""
+        linhas.append(f"Uso: equipamento normal · bônus: {fmt_bonus(alvo['bonus'])}{nivel}")
+    linhas.append("Compre com `!comprar [personagem] [item] [quantidade]`.")
+    await ctx.send("\n".join(linhas))
 
 
 @bot.command(name="comprar")
@@ -2411,37 +2608,39 @@ async def comprar(ctx, *, raw: str = ""):
             )
             if atualizacao.rowcount == 1:
                 db.execute(
-                    "INSERT INTO habilidades (ficha_id, nome, bonus, duracao, modo) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO habilidades "
+                    "(ficha_id, nome, bonus, duracao, modo, requisitos, custos, efeitos) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (f["id"], habilidade["nome"], json.dumps(habilidade["bonus"]),
-                     habilidade["duracao"], habilidade["modo"]),
+                     habilidade["duracao"], habilidade["modo"], json.dumps(habilidade["requisitos"]),
+                     json.dumps(habilidade["custos"]), json.dumps(habilidade["efeitos"])),
                 )
                 comprada = True
         if not comprada:
             await ctx.send(f"💰 **{f['nome']}** nao tem moedas suficientes para **{habilidade['nome']}**.")
             return
-        await ctx.send(f"📖 **{f['nome']}** aprendeu **{habilidade['nome']}** "
-                       f"({fmt_bonus(habilidade['bonus'])} • tipo {nome_tipo_habilidade(habilidade['modo'])}) "
-                       f"por {habilidade['preco']} 💰. restam {f['moedas'] - habilidade['preco']} moeda(s).")
+        await ctx.send(f"📖 **{f['nome']}** aprendeu **{habilidade['nome']}** por "
+                       f"{habilidade['preco']} 💰. restam {f['moedas'] - habilidade['preco']} moeda(s).")
         return
     if qtd is None:
         await ctx.send("uso: `!comprar [personagem] [item] [quantidade]` — veja os itens com `!loja`.")
         return
     nv = min(20, nivel_efetivo(f))
     if nv < alvo["nivel"]:
-        await ctx.send(f"🔒 **{alvo['nome']}** so e vendido a partir do nivel {alvo['nivel']} (**{f['nome']}** e nivel {nv}).")
+        await ctx.send(f"🔒 **{nome_exibicao_item(alvo['nome'])}** so e vendido a partir do nivel {alvo['nivel']} (**{f['nome']}** e nivel {nv}).")
         return
     total = alvo["preco"] * qtd
     if f["moedas"] < total:
-        await ctx.send(f"💰 {qtd}x **{alvo['nome']}** custa {total} e **{f['nome']}** tem so {f['moedas']}.")
+        await ctx.send(f"💰 {qtd}x **{nome_exibicao_item(alvo['nome'])}** custa {total} e **{f['nome']}** tem so {f['moedas']}.")
         return
     existente = get_item(f["id"], alvo["nome"], exato=True)
     if existente and not mesmo_item(existente, alvo["tipo"], alvo["bonus"]):
-        await ctx.send(f"**{f['nome']}** ja tem um item chamado **{existente['nome']}** com outro efeito. "
+        await ctx.send(f"**{f['nome']}** ja tem um item chamado **{nome_exibicao_item(existente['nome'])}** com outro efeito. "
                        "renomeie o seu com `!renomearitem` antes de comprar.")
         return
     db.execute("UPDATE fichas SET moedas=moedas-? WHERE id=?", (total, f["id"]))
     dar_item(f["id"], alvo, qtd)
-    await ctx.send(f"🛒 **{f['nome']}** comprou {qtd}x **{alvo['nome']}** ({fmt_bonus(alvo['bonus'])}) por {total} 💰. "
+    await ctx.send(f"🛒 **{f['nome']}** comprou {qtd}x **{nome_exibicao_item(alvo['nome'])}** ({fmt_bonus(alvo['bonus'])}) por {total} 💰. "
                    f"restam {f['moedas'] - total} moeda(s).")
 
 
@@ -2463,22 +2662,22 @@ async def vender(ctx, *, raw: str = ""):
         return
     cat = CATALOGO_NORM.get(norm(item["nome"]))
     if not cat or not mesmo_item(item, cat["tipo"], cat["bonus"]):
-        await ctx.send(f"a loja nao compra **{item['nome']}**: so itens do catalogo (`!loja`) e os achados nas dungeons.")
+        await ctx.send(f"a loja nao compra **{nome_exibicao_item(item['nome'])}**: so itens do catalogo (`!loja`) e os achados nas dungeons.")
         return
     if item["vendaveis"] < 1:
-        await ctx.send(f"**{item['nome']}** de **{f['nome']}** foi criado a mao (`!pegar`) e nao pode ser vendido. "
+        await ctx.send(f"**{nome_exibicao_item(item['nome'])}** de **{f['nome']}** foi criado a mao (`!pegar`) e nao pode ser vendido. "
                        "so vende o que foi comprado ou achado nas dungeons.")
         return
     qtd = item["vendaveis"] if qtd is None else qtd
     if qtd > item["vendaveis"]:
-        await ctx.send(f"**{f['nome']}** so pode vender {item['vendaveis']}x **{item['nome']}**.")
+        await ctx.send(f"**{f['nome']}** so pode vender {item['vendaveis']}x **{nome_exibicao_item(item['nome'])}**.")
         return
     valor = (cat["preco"] // 2) * qtd
     tirar_unidades(item, qtd, vendaveis_saindo=qtd)
     db.execute("UPDATE fichas SET moedas=moedas+? WHERE id=?", (valor, f["id"]))
     db.commit()
     normalizar_vitais(f["id"])
-    await ctx.send(f"💱 **{f['nome']}** vendeu {qtd}x **{item['nome']}** por {valor} 💰 "
+    await ctx.send(f"💱 **{f['nome']}** vendeu {qtd}x **{nome_exibicao_item(item['nome'])}** por {valor} 💰 "
                    f"(agora tem {f['moedas'] + valor}).")
 
 
@@ -2582,9 +2781,18 @@ async def status(ctx, *, raw: str = ""):
     linhas = []
     for r in rows:
         dur = f"{r['duracao']} turno(s) restante(s)" if r["duracao"] else "duração indefinida"
-        tipo = "efeito por turno" if r["tipo"] == "dinamico" else "bônus de atributo"
-        linhas.append(f"🧪 **{r['nome']}** · {tipo}\n"
-                      f"   Efeito: {fmt_bonus(json.loads(r['bonus']), r['tipo'] == 'dinamico')} · {dur}")
+        if r["tipo"] == "condicao":
+            dados = json.loads(r["bonus"])
+            condicao = dados["tipo"]
+            regra = (f"{dados['intensidade']} de dano ao corpo por turno"
+                     if CONDICOES[condicao]["tipo"] == "dano"
+                     else "perde a ação" if condicao == "congelamento"
+                     else "50% de chance de perder a ação")
+            linhas.append(f"🧪 **{r['nome']}** · {regra} · {dur}")
+        else:
+            tipo = "efeito por turno" if r["tipo"] == "dinamico" else "bônus de atributo"
+            linhas.append(f"🧪 **{r['nome']}** · {tipo}\n"
+                          f"   Efeito: {fmt_bonus(json.loads(r['bonus']), r['tipo'] == 'dinamico')} · {dur}")
     await enviar_longo(
         ctx,
         f"🛡️ **Status ativos · {f['nome']}** ({len(rows)})\n\n" + "\n\n".join(linhas)
@@ -2620,7 +2828,7 @@ async def rmstatus(ctx, *, raw: str = ""):
 
 # turno
 def processar_turno(f) -> list:
-    """aplica status dinamico, reduz duracoes e remove status vencidos."""
+    """aplica efeitos por turno, reduz duracoes e remove status vencidos."""
     linhas = []
     bonus = get_bonus(f["id"])
     vigor, vontade = maximos(f, bonus)
@@ -2633,6 +2841,13 @@ def processar_turno(f) -> list:
             for k, v in json.loads(s["bonus"]).items():
                 valores[k] = max(0, min(limites[k], valores[k] + valor_bonus(v, limites[k])))
             linhas.append(f"🧪 {s['nome']}: {fmt_bonus(json.loads(s['bonus']), True)}")
+        elif s["tipo"] == "condicao":
+            efeito = json.loads(s["bonus"])
+            tipo = efeito["tipo"]
+            if CONDICOES[tipo]["tipo"] == "dano":
+                dano = efeito["intensidade"]
+                valores["corpo"] = max(0, valores["corpo"] - dano)
+                linhas.append(f"🧪 {CONDICOES[tipo]['nome']}: -{dano} crp.")
         if s["duracao"] is not None:
             nova = s["duracao"] - 1
             if nova <= 0:
@@ -2657,9 +2872,9 @@ def processar_turno(f) -> list:
     if inicio["mente"] != novo["mente"]:
         linhas.append(f"mente: {inicio['mente']} → {novo['mente']}")
     if novo["corpo"] == 0:
-        linhas.append("💀 corpo em 0: desmaiado ou morto, conforme o contexto.")
+        linhas.append("💀 corpo em 0: morto na dungeon.")
     if novo["mente"] == 0:
-        linhas.append("🌀 mente em 0.")
+        linhas.append("🌀 mente em 0: desmaiado.")
     return linhas or ["sem efeitos neste turno."]
 
 
@@ -2910,20 +3125,41 @@ def parse_duracao(txt: str):
     return None, False
 
 
+def parse_efeito_habilidade_token(token: str):
+    partes = re.fullmatch(
+        r"@?(veneno|queimadura|sangramento|congelamento|paralisia)(?:[:=](\d+))?"
+        r"(?:[:=](\d+))?(?:[:=](\d+))?",
+        norm(token),
+    )
+    if not partes:
+        return None
+    tipo, intensidade, duracao, chance = partes.groups()
+    efeito = {
+        "tipo": tipo,
+        "intensidade": int(intensidade or 1),
+        "duracao": int(duracao or 2),
+    }
+    if chance is not None:
+        efeito["chance"] = int(chance)
+    return validar_efeitos_habilidade([efeito], "personalizada")
+
+
 @bot.command(name="ch", aliases=["criarhabilidade"])
 async def criarhabilidade(ctx, *, raw: str = ""):
-    f, resto = await resolver(ctx, tokenizar(raw), editar=True, aridades=lambda n: 3 <= n <= 5)
+    f, resto = await resolver(ctx, tokenizar(raw), editar=True, aridades=lambda n: 3 <= n <= 6)
     if not f:
         return
-    if not 3 <= len(resto) <= 5:
+    if not 3 <= len(resto) <= 6:
         await ctx.send(
             "uso: `!ch [personagem] [nome] [+sigla,-sigla] [valores] [persistente|turnos] "
-            "[perto|longe|magia|jujutsu|melhoria|mel|penalidade|pen]`\n"
+            "[perto|longe|magia|jujutsu|melhoria|mel|penalidade|pen] [condicao:intensidade:turnos[:chance]]`\n"
             "ex.: `!ch Kage CorteLinear +for,+agi 2,5 perto`\n"
             "ex.: `!ch Kage ArtesMarciais +for 5 persistente mel`\n"
             "ex.: `!ch Kage Furia +for 3 4` (dura 4 turnos)\n"
             "ex.: `!ch Kage Cura +crp 15` (crp e mnt valem na hora em que a habilidade e usada)\n"
-            "ex.: `!ch Kage Cura +crp 50%` (porcentagem: 50% do vigor; em atributos, % do valor do atributo)")
+            "ex.: `!ch Kage Cura +crp 50%` (porcentagem: 50% do vigor; em atributos, % do valor do atributo)\n"
+            "ex.: `!ch Kage Chama +int 3 magia queimadura:3:2` (3 de dano por 2 turnos)\n"
+            "condicoes: veneno, queimadura, sangramento, congelamento e paralisia; chance opcional de 1 a 100.")
         return
     nome = resto[0][0].strip()
     erro = validar_nome(nome)
@@ -2936,29 +3172,40 @@ async def criarhabilidade(ctx, *, raw: str = ""):
         return
     duracao, modo = 1, "buff"
     extras = [t for t, _ in resto[3:]]
+    efeitos = []
     for extra in extras:
         if norm(extra) in TIPOS_HABILIDADE:
             modo = TIPOS_HABILIDADE[norm(extra)]
         else:
-            duracao, ok = parse_duracao(extra)
-            if not ok:
-                await ctx.send(f"nao entendi **{extra}**. informe uma duracao e/ou um tipo: "
-                               "`perto`, `longe`, `magia`, `jujutsu`, `melhoria` (`mel`) ou "
-                               "`penalidade` (`pen`).")
+            try:
+                efeito = parse_efeito_habilidade_token(extra)
+            except ValueError as erro:
+                await ctx.send(str(erro))
                 return
+            if efeito:
+                efeitos.extend(efeito)
+            else:
+                duracao, ok = parse_duracao(extra)
+                if not ok:
+                    await ctx.send(f"nao entendi **{extra}**. informe uma duracao, um tipo (`perto`, `longe`, "
+                                   "`magia`, `jujutsu`, `mel`, `pen`) ou condicao no formato "
+                                   "`veneno:3:2`.")
+                    return
     if get_habilidade(f["id"], nome, exato=True):
         await ctx.send(f"**{f['nome']}** ja tem a habilidade **{nome}**. "
                        "para trocar, apague com `!apagarh` e crie de novo.")
         return
-    db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao, modo) VALUES (?, ?, ?, ?, ?)",
-               (f["id"], nome, json.dumps(bonus), duracao, modo))
+    db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao, modo, efeitos) VALUES (?, ?, ?, ?, ?, ?)",
+               (f["id"], nome, json.dumps(bonus), duracao, modo, json.dumps(efeitos)))
     db.commit()
     if all(k in ("corpo", "mente") for k in bonus):
         dica = "use `!usarh` para aplicar o efeito."
     else:
         dica = "use `!usarh` para ativar, ou `!d20 [sigla] [habilidade]` para somar so naquela rolagem."
     await ctx.send(f"✨ habilidade **{nome}** criada em **{f['nome']}**: {fmt_bonus(bonus)} — "
-                   f"{fmt_duracao_hab(bonus, duracao)} • tipo **{nome_tipo_habilidade(modo)}**.\n{dica}")
+                   f"{fmt_duracao_hab(bonus, duracao)} • tipo **{nome_tipo_habilidade(modo)}**."
+                   + (f"\nCondição: {texto_efeitos_condicao(efeitos)}." if efeitos else "")
+                   + f"\n{dica}")
 
 
 @bot.command(name="habilidades")
@@ -2977,6 +3224,9 @@ async def habilidades(ctx, *, raw: str = ""):
                  f"   Tipo: {nome_tipo_habilidade(r['modo'])} · "
                  f"Efeito: {fmt_bonus(json.loads(r['bonus']))} · "
                  f"Duração: {fmt_duracao_hab(json.loads(r['bonus']), r['duracao'])}")
+        efeitos_status = json.loads(r["efeitos"] or "[]")
+        if efeitos_status:
+            texto += f"\n   Condições: {texto_efeitos_condicao(efeitos_status)}"
         if r["ativa"] and r["restam"] is not None:
             texto += f" · Restam {r['restam']} turno(s)"
         linhas.append(texto)
@@ -3010,13 +3260,48 @@ def ativar_habilidade(f, hab) -> list:
         else:
             db.execute("UPDATE habilidades SET ativa=1, restam=? WHERE id=?", (hab["duracao"], hab["id"]))
             linhas.append(f"ativa: {fmt_bonus(attrs)} — {fmt_duracao(hab['duracao'])}")
+    if hab["modo"] == "buff":
+        linhas += texto_aplicacao_condicoes(f, json.loads(hab["efeitos"] or "[]"))
     db.commit()
     normalizar_vitais(f["id"])
     return linhas
 
 
+def validar_uso_habilidade(f, hab):
+    requisitos = json.loads(hab["requisitos"] or "{}")
+    for atributo, minimo in requisitos.items():
+        if f[atributo] < minimo:
+            return f"requer **{ATRIBUTOS[atributo]} {minimo}** (voce tem {f[atributo]})."
+
+    custos = json.loads(hab["custos"] or "{}")
+    for vital, custo in custos.items():
+        if vital == "corpo" and f[vital] - custo < 1:
+            return f"custa **{custo} {SIG[vital]}**, mas voce precisa manter pelo menos 1 ponto de corpo."
+        if f[vital] < custo:
+            return f"custa **{custo} {SIG[vital]}**, mas voce tem apenas {f[vital]}."
+    return None
+
+
+def pagar_custo_habilidade(f, hab) -> list:
+    custos = json.loads(hab["custos"] or "{}")
+    if not custos:
+        return []
+    atual = get_ficha_id(f["id"])
+    valores = {vital: atual[vital] for vital in ("corpo", "mente")}
+    linhas = []
+    for vital, custo in custos.items():
+        antes = valores[vital]
+        valores[vital] -= custo
+        linhas.append(f"{SIG[vital]}: {antes} → {valores[vital]} (custo de **{hab['nome']}**)")
+    db.execute("UPDATE fichas SET corpo=?, mente=? WHERE id=?",
+               (valores["corpo"], valores["mente"], f["id"]))
+    db.commit()
+    return linhas
+
+
 def aplicar_habilidade_alvo(run, hab, alvo_ref):
     bonus = json.loads(hab["bonus"])
+    efeitos_status = json.loads(hab["efeitos"] or "[]")
     modo = hab["modo"]
     if modo == "buff" and alvo_ref[0] != "j":
         return None, "uma melhoria so pode ter como alvo um aliado."
@@ -3048,6 +3333,7 @@ def aplicar_habilidade_alvo(run, hab, alvo_ref):
                 (alvo["id"], nome_status, json.dumps(attrs), hab["duracao"]),
             )
             linhas.append(f"atributos: {fmt_bonus(attrs)} por {fmt_duracao(hab['duracao'])}")
+        linhas += texto_aplicacao_condicoes(alvo, efeitos_status, hab["ficha_id"])
         db.commit()
         normalizar_vitais(alvo["id"])
         return f"**{alvo['nome']}**", linhas or ["a habilidade nao tem efeitos aplicaveis."]
@@ -3064,6 +3350,7 @@ def aplicar_habilidade_alvo(run, hab, alvo_ref):
             "nome": hab["nome"], "bonus": attrs, "duracao": hab["duracao"],
         })
         linhas.append(f"atributos: {fmt_bonus(attrs)} por {fmt_duracao(hab['duracao'])}")
+    linhas += texto_aplicacao_condicoes(monstro, efeitos_status, hab["ficha_id"])
     return f"**{monstro['nome']}**", linhas or ["a habilidade nao tem efeitos aplicaveis."]
 
 
@@ -3078,10 +3365,18 @@ async def usarhabilidade(ctx, *, raw: str = ""):
             f = get_ficha_id(fid)
             registrar_alvo(ctx, f)
             hab_txt, alvo_ref = separar_alvo_dungeon(run, raw)
+            if alvo_ref and alvo_ref[0] == "a":
+                await ctx.send("alvo ambiguo: " + ", ".join(f"**{nome}**" for nome in alvo_ref[1])
+                               + ". escreva mais do nome.")
+                return
             nome_hab = hab_txt.strip().strip(ASPAS).strip()
             hab = get_habilidade(fid, nome_hab) if nome_hab else None
             if not hab:
                 await ctx.send("uso: `!usarh [habilidade] [alvo opcional]`.")
+                return
+            erro_uso = validar_uso_habilidade(f, hab)
+            if erro_uso:
+                await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
                 return
             if hab["modo"] in ("buff", "debuff"):
                 if alvo_ref is None:
@@ -3097,6 +3392,7 @@ async def usarhabilidade(ctx, *, raw: str = ""):
                     return
                 if hab["modo"] == "buff" and alvo_ref == ("j", fid):
                     linhas = ativar_habilidade(f, hab)
+                    linhas += pagar_custo_habilidade(f, hab)
                     if hab["duracao"] is not None and any(k in ATRIBUTOS for k in json.loads(hab["bonus"])):
                         db.execute("UPDATE habilidades SET restam=? WHERE id=?", (hab["duracao"] + 1, hab["id"]))
                         db.commit()
@@ -3108,7 +3404,8 @@ async def usarhabilidade(ctx, *, raw: str = ""):
                     return
                 if alvo_ref[0] == "j":
                     registrar_alvo(ctx, get_ficha_id(alvo_ref[1]))
-                linhas = [f"✨ **{f['nome']}** usou **{hab['nome']}** em {rotulo}."] + resultado
+                linhas = ([f"✨ **{f['nome']}** usou **{hab['nome']}** em {rotulo}."]
+                          + resultado + pagar_custo_habilidade(f, hab))
                 await fim_da_acao(ctx, run, fid, linhas)
                 return
             if hab["modo"] in MODOS_ATAQUE:
@@ -3122,6 +3419,7 @@ async def usarhabilidade(ctx, *, raw: str = ""):
                                "use `!atacar [alvo] [tipo]/[habilidade]`.")
                 return
             linhas = ativar_habilidade(f, hab)
+            linhas += pagar_custo_habilidade(f, hab)
             await fim_da_acao(ctx, run, fid, [f"✨ **{f['nome']}** usou **{hab['nome']}**.", *linhas])
             return
 
@@ -3135,7 +3433,12 @@ async def usarhabilidade(ctx, *, raw: str = ""):
     if not hab:
         await ctx.send(msg_nao_tem(f, "habilidade", resto[0][0]))
         return
+    erro_uso = validar_uso_habilidade(f, hab)
+    if erro_uso:
+        await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
+        return
     linhas = ativar_habilidade(f, hab)
+    linhas += pagar_custo_habilidade(f, hab)
     await ctx.send(f"✨ **{f['nome']}** usou **{hab['nome']}**.\n" + "\n".join(linhas))
 
 
@@ -3261,10 +3564,12 @@ async def restaurar(ctx, *, raw: str = ""):
             for r in d["notas"]:
                 db.execute("INSERT INTO notas (ficha_id, titulo, texto) VALUES (?, ?, ?)", (novo_id, r["titulo"], r["texto"]))
             for r in d["habilidades"]:
-                db.execute("INSERT INTO habilidades (ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                db.execute("INSERT INTO habilidades "
+                           "(ficha_id, nome, bonus, duracao, ativa, restam, modo, mental, requisitos, custos, efeitos) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (novo_id, r["nome"], r["bonus"], r["duracao"], r.get("ativa", 0), r.get("restam"),
-                            r.get("modo", "buff"), r.get("mental", 0), r.get("requisitos", "{}")))
+                            r.get("modo", "buff"), r.get("mental", 0), r.get("requisitos", "{}"),
+                            r.get("custos", "{}"), r.get("efeitos", "[]")))
             nomes.append(nome)
             donos.add(d["dono_id"])
         db.commit()
@@ -3432,13 +3737,13 @@ CHANCE_EVENTO = 0.6                 # chance de um evento de decisao aparecer no
 # niveis = faixa da dungeon; personagens continuam podendo escolher qualquer dificuldade
 DIFICULDADES = {
     "facil":    {"fator": 0.40, "andares": 4, "xp": 0.8, "moedas": 1.0, "niveis": (1, 5),
-                 "chance_loot": 0.50, "chance_equip": 0.20, "chance_consumivel_chefe": 0.70},
+                 "chance_loot": 0.65, "chance_equip": 0.22, "chance_consumivel_chefe": 0.85},
     "medio":    {"fator": 0.55, "andares": 5, "xp": 1.0, "moedas": 1.6, "niveis": (6, 10),
-                 "chance_loot": 0.58, "chance_equip": 0.25, "chance_consumivel_chefe": 0.80},
+                 "chance_loot": 0.72, "chance_equip": 0.27, "chance_consumivel_chefe": 0.92},
     "dificil":  {"fator": 0.72, "andares": 6, "xp": 1.4, "moedas": 2.4, "niveis": (11, 15),
-                 "chance_loot": 0.66, "chance_equip": 0.30, "chance_consumivel_chefe": 0.90},
+                 "chance_loot": 0.80, "chance_equip": 0.32, "chance_consumivel_chefe": 0.97},
     "pesadelo": {"fator": 0.90, "andares": 7, "xp": 2.0, "moedas": 3.5, "niveis": (16, 20),
-                 "chance_loot": 0.72, "chance_equip": 0.35, "chance_consumivel_chefe": 0.95},
+                 "chance_loot": 0.88, "chance_equip": 0.38, "chance_consumivel_chefe": 1.00},
 }
 APELIDOS_DIF = {"facil": "facil", "medio": "medio", "media": "medio", "normal": "medio",
                 "dificil": "dificil", "pesadelo": "pesadelo"}
@@ -3558,29 +3863,55 @@ EQUIPAMENTOS = [
     ("Escudo", "m", ["resistencia", "combate"]),
     ("Amuleto", "m", ["sabedoria", "carisma"]),
     ("Capa", "f", ["agilidade", "sabedoria"]),
+    ("Lança", "f", ["forca", "precisao"]),
+    ("Luva", "f", ["forca", "agilidade"]),
+    ("Bota", "f", ["agilidade", "resistencia"]),
+    ("Anel", "m", ["inteligencia", "carisma"]),
+    ("Grimório", "m", ["inteligencia", "sabedoria"]),
 ]
-TIERS = [("de Ferro", "de Ferro"), ("de Aco", "de Aco"), ("Runico", "Runica"), ("Lendario", "Lendaria")]
+TIERS = [("de Ferro", "de Ferro"), ("de Aço", "de Aço"), ("Rúnico", "Rúnica"), ("Lendário", "Lendária")]
 PESO_TIER = {"facil": [80, 20, 0, 0], "medio": [45, 45, 10, 0], "dificil": [15, 45, 35, 5],
              "pesadelo": [0, 20, 50, 30]}
 TIER_MAXIMO_DIF = {"facil": 1, "medio": 2, "dificil": 3, "pesadelo": 3}
 CONSUMIVEIS = {
-    "Pocao de Cura Menor": {"corpo": 15},
-    "Pocao de Cura": {"corpo": "35%"},
-    "Pocao de Cura Maior": {"corpo": "60%"},
-    "Tonico Mental": {"mente": "35%"},
+    "Poção de Cura Menor": {"corpo": 15},
+    "Poção de Cura": {"corpo": "35%"},
+    "Poção de Cura Maior": {"corpo": "60%"},
+    "Tônico Mental": {"mente": "35%"},
     "Elixir Revigorante": {"corpo": "30%", "mente": "30%"},
+    "Poção de Cura Suprema": {"corpo": "80%"},
+    "Tônico Mental Maior": {"mente": "60%"},
+    "Elixir de Equilíbrio": {"corpo": "45%", "mente": "45%"},
 }
 PESO_CONSUMIVEL = {
-    "facil": {"Pocao de Cura Menor": 70, "Pocao de Cura": 20, "Tonico Mental": 10},
-    "medio": {"Pocao de Cura Menor": 35, "Pocao de Cura": 40, "Tonico Mental": 20, "Elixir Revigorante": 5},
-    "dificil": {"Pocao de Cura": 40, "Pocao de Cura Maior": 20, "Tonico Mental": 25, "Elixir Revigorante": 15},
-    "pesadelo": {"Pocao de Cura": 20, "Pocao de Cura Maior": 40, "Tonico Mental": 15, "Elixir Revigorante": 25},
+    "facil": {
+        "Poção de Cura Menor": 55, "Poção de Cura": 20, "Tônico Mental": 10,
+        "Elixir Revigorante": 8, "Tônico Mental Maior": 4, "Elixir de Equilíbrio": 3,
+    },
+    "medio": {
+        "Poção de Cura Menor": 25, "Poção de Cura": 32, "Poção de Cura Maior": 8,
+        "Tônico Mental": 15, "Tônico Mental Maior": 6, "Elixir Revigorante": 9,
+        "Elixir de Equilíbrio": 5,
+    },
+    "dificil": {
+        "Poção de Cura": 28, "Poção de Cura Maior": 18, "Poção de Cura Suprema": 6,
+        "Tônico Mental": 18, "Tônico Mental Maior": 9, "Elixir Revigorante": 13,
+        "Elixir de Equilíbrio": 8,
+    },
+    "pesadelo": {
+        "Poção de Cura": 18, "Poção de Cura Maior": 25, "Poção de Cura Suprema": 12,
+        "Tônico Mental": 12, "Tônico Mental Maior": 12, "Elixir Revigorante": 12,
+        "Elixir de Equilíbrio": 9,
+    },
 }
 
 
 # loja: precos
-PRECO_CONSUMIVEL = {"Pocao de Cura Menor": 15, "Pocao de Cura": 40, "Pocao de Cura Maior": 90,
-                    "Tonico Mental": 40, "Elixir Revigorante": 80}
+PRECO_CONSUMIVEL = {
+    "Poção de Cura Menor": 15, "Poção de Cura": 40, "Poção de Cura Maior": 90,
+    "Tônico Mental": 40, "Elixir Revigorante": 80, "Poção de Cura Suprema": 150,
+    "Tônico Mental Maior": 110, "Elixir de Equilíbrio": 145,
+}
 PRECO_TIER = [40, 120, 350, 1000]   # ferro, aco, runico, lendario (a loja paga a metade)
 NIVEL_TIER = [1, 6, 11, None]       # nivel minimo para comprar; lendario nao e vendido, so achado
 
@@ -3611,8 +3942,14 @@ CATALOGO = montar_catalogo()
 CATALOGO_NORM = {norm(k): v for k, v in CATALOGO.items()}
 
 
+def nome_exibicao_item(nome: str) -> str:
+    """Usa a grafia oficial dos itens do catálogo, mesmo em fichas antigas."""
+    catalogo = CATALOGO_NORM.get(norm(nome))
+    return catalogo["nome"] if catalogo else nome.title()
+
+
 def carregar_habilidades_loja() -> list:
-    """Valida o JSON: nome, bonus (atributos/vitais), duracao (inteiro ou null), modo e preco."""
+    """Valida as habilidades da loja e seus metadados opcionais."""
     caminho = os.path.join(PASTA, "loja_habilidades.json")
     try:
         with open(caminho, encoding="utf-8") as arquivo:
@@ -3626,14 +3963,23 @@ def carregar_habilidades_loja() -> list:
         raise ValueError(f"{caminho} deve conter somente uma lista chamada 'habilidades'.")
 
     catalogo, nomes = [], set()
-    campos = {"nome", "bonus", "duracao", "modo", "preco"}
+    obrigatorios = {"nome", "bonus", "duracao", "modo", "preco"}
+    opcionais = {"descricao", "requisitos", "custos", "efeitos"}
     for indice, habilidade in enumerate(dados["habilidades"], 1):
-        if not isinstance(habilidade, dict) or set(habilidade) != campos:
-            raise ValueError(f"habilidade #{indice} deve conter exatamente: {', '.join(sorted(campos))}.")
+        if (not isinstance(habilidade, dict) or not obrigatorios.issubset(habilidade)
+                or set(habilidade) - obrigatorios - opcionais):
+            campos = ", ".join(sorted(obrigatorios))
+            raise ValueError(f"habilidade #{indice} deve conter {campos} e somente metadados opcionais conhecidos.")
         nome, bonus = habilidade["nome"], habilidade["bonus"]
         duracao, modo, preco = habilidade["duracao"], habilidade["modo"], habilidade["preco"]
+        descricao = habilidade.get("descricao", "")
+        requisitos = habilidade.get("requisitos", {})
+        custos = habilidade.get("custos", {})
+        efeitos = habilidade.get("efeitos", [])
         if not isinstance(nome, str) or validar_nome(nome.strip()) or not nome.strip():
             raise ValueError(f"nome invalido na habilidade #{indice}.")
+        if not isinstance(descricao, str):
+            raise ValueError(f"descricao invalida na habilidade **{nome}**.")
         chave_nome = norm(nome)
         if chave_nome in nomes or chave_nome in CATALOGO_NORM:
             raise ValueError(f"nome duplicado ou em conflito com um item da loja: {nome}.")
@@ -3649,8 +3995,20 @@ def carregar_habilidades_loja() -> list:
         modo = TIPOS_HABILIDADE[norm(modo)]
         if type(preco) is not int or preco < 0:
             raise ValueError(f"preco invalido na habilidade **{nome}**; use um inteiro nao negativo.")
+        if (not isinstance(requisitos, dict)
+                or any(atributo not in ATRIBUTOS or type(valor) is not int or valor < 1
+                       for atributo, valor in requisitos.items())):
+            raise ValueError(f"requisitos invalidos na habilidade **{nome}**; use atributos e valores inteiros positivos.")
+        if (not isinstance(custos, dict)
+                or any(vital not in ("corpo", "mente") or type(valor) is not int or valor < 1
+                       for vital, valor in custos.items())):
+            raise ValueError(f"custos invalidos na habilidade **{nome}**; use corpo/mente e valores inteiros positivos.")
+        efeitos = validar_efeitos_habilidade(efeitos, nome)
         nomes.add(chave_nome)
-        catalogo.append({"nome": nome.strip(), "bonus": bonus, "duracao": duracao, "modo": modo, "preco": preco})
+        catalogo.append({
+            "nome": nome.strip(), "bonus": bonus, "duracao": duracao, "modo": modo, "preco": preco,
+            "descricao": descricao.strip(), "requisitos": requisitos, "custos": custos, "efeitos": efeitos,
+        })
     return catalogo
 
 
@@ -3682,8 +4040,12 @@ def sortear_loot(dif: str, chefe: bool, rel: float = 1.0) -> list:
             itens.append(gerar_consumivel(dif))
         return itens
     if random.random() < min(0.95, regras["chance_loot"] * fator):
-        return [gerar_equip(dif, bonus_tier=extra)
-                if random.random() < regras["chance_equip"] else gerar_consumivel(dif)]
+        itens = [gerar_equip(dif, bonus_tier=extra)
+                 if random.random() < regras["chance_equip"] else gerar_consumivel(dif)]
+        chance_item_extra = min(0.35, 0.12 + max(0.0, rel - 1.0) * 0.15)
+        if random.random() < chance_item_extra:
+            itens.append(gerar_consumivel(dif))
+        return itens
     return []
 
 
@@ -3724,7 +4086,7 @@ def rolar_monstro(m: dict, attr: str, extra_bonus: int = 0) -> dict:
     """mesma regra das fichas (d20 + atributo, 20 natural soma 50% do atributo); inimigos nao sofrem penalidades."""
     dado = random.randint(1, 20)
     base = m["attrs"][attr] + sum(
-        valor_bonus(efeito["bonus"].get(attr, 0), m["attrs"][attr])
+        valor_bonus(efeito.get("bonus", {}).get(attr, 0), m["attrs"][attr])
         for efeito in m.get("efeitos", [])
     )
     extra = max(0, int(base * 0.5)) if dado == 20 else 0
@@ -3738,7 +4100,7 @@ def rolar_media(c, attrs: tuple[str, str], extra_bonus: int = 0) -> dict:
         bases = [c["attrs"][attr] for attr in attrs]
         efeitos = c.get("efeitos", [])
         modificadores = [
-            sum(valor_bonus(efeito["bonus"].get(attr, 0), c["attrs"][attr]) for efeito in efeitos)
+            sum(valor_bonus(efeito.get("bonus", {}).get(attr, 0), c["attrs"][attr]) for efeito in efeitos)
             for attr in attrs
         ]
         base = sum(bases) // 2
@@ -3772,7 +4134,7 @@ def rolar_atributo_e_metade(c, attrs: tuple[str, tuple[str, int]], extra_bonus: 
         bases = c["attrs"]
         efeitos = c.get("efeitos", [])
         modificadores = {
-            attr: sum(valor_bonus(efeito["bonus"].get(attr, 0), bases[attr]) for efeito in efeitos)
+            attr: sum(valor_bonus(efeito.get("bonus", {}).get(attr, 0), bases[attr]) for efeito in efeitos)
             for attr in (principal, fracionado)
         }
         penalidades = {attr: 0 for attr in (principal, fracionado)}
@@ -3846,13 +4208,29 @@ def inimigo_vivo(m: dict) -> bool:
     return m["corpo"] > 0 and not m.get("fugiu", False)
 
 
-def processar_efeitos_monstro(m: dict) -> list:
+def processar_efeitos_monstro(run: dict, m: dict) -> list:
     linhas = []
     efeitos = []
     for efeito in m.get("efeitos", []):
         if efeito["duracao"] is None:
             efeitos.append(efeito)
             continue
+        if (m["corpo"] > 0 and efeito.get("condicao") in CONDICOES
+                and CONDICOES[efeito["condicao"]]["tipo"] == "dano"):
+            antes = m["corpo"]
+            m["corpo"] = max(0, antes - efeito["intensidade"])
+            dano = antes - m["corpo"]
+            linhas.append(f"🧪 {CONDICOES[efeito['condicao']]['nome']} em **{m['nome']}**: "
+                          f"corpo {antes}→{m['corpo']}.")
+            origem = efeito.get("origem")
+            if dano and origem in run["resumo"]:
+                run["contrib"].setdefault(origem, {"dano": 0, "acertos": 0, "abates": 0})["dano"] += dano
+                run["resumo"][origem]["dano"] += dano
+            if antes > 0 and m["corpo"] == 0:
+                linhas.append(f"☠️ **{m['nome']}** foi derrotado pelo efeito de status.")
+                if origem in run["resumo"]:
+                    run["contrib"].setdefault(origem, {"dano": 0, "acertos": 0, "abates": 0})["abates"] += 1
+                    run["resumo"][origem]["abates"] += 1
         efeito["duracao"] -= 1
         if efeito["duracao"] > 0:
             efeitos.append(efeito)
@@ -3863,7 +4241,7 @@ def processar_efeitos_monstro(m: dict) -> list:
 
 
 def acao_ataque(f, m: dict, acerto: str, dano: str, nome_hab=None, bonus_acerto=0, bonus_dano=0,
-                reg=None, tot=None) -> list:
+                reg=None, tot=None, efeitos_status=None) -> list:
     """reg: contagem do andar do jogador; tot: contagem da dungeon inteira (ranking).
     ambos tem "dano", "acertos" e "abates"; dano conta so o que realmente tirou do inimigo."""
     contas = [c for c in (reg, tot) if c is not None]
@@ -3880,6 +4258,8 @@ def acao_ataque(f, m: dict, acerto: str, dano: str, nome_hab=None, bonus_acerto=
         for c in contas:
             c["dano"] = c.get("dano", 0) + antes - depois
     linhas = [linha]
+    if pts and inimigo_vivo(m) and efeitos_status:
+        linhas += texto_aplicacao_condicoes(m, efeitos_status, f["id"])
     if not inimigo_vivo(m):
         linhas.append(f"☠️ **{m['nome']}** foi derrotado por **{f['nome']}**!")
         if vivo_antes:
@@ -3889,6 +4269,9 @@ def acao_ataque(f, m: dict, acerto: str, dano: str, nome_hab=None, bonus_acerto=
 
 
 def acao_monstro(run: dict, m: dict) -> list:
+    condicao = condicao_impede_acao(m.get("efeitos", []))
+    if condicao:
+        return [f"⚠️ **{m['nome']}** está sob **{condicao}** e perde a ação."]
     alvos = [f for f in (get_ficha_id(fid) for fid in ativos(run)) if f and f["corpo"] > 0]
     if not alvos:
         return []
@@ -3933,7 +4316,13 @@ def acao_monstro(run: dict, m: dict) -> list:
     if pts:
         antes, depois = aplicar_dano(f, pts, campo)
         linha += f" ({campo} {antes}→{depois})"
-    return [linha]
+    linhas = [linha]
+    efeito = EFEITOS_ATAQUES_MONSTRO.get(norm(nome_atk))
+    if pts and efeito:
+        if aplicar_condicao(f, efeito):
+            linhas.append(f"🧪 {CONDICOES[efeito['tipo']]['nome']} aplicado em **{f['nome']}** "
+                          f"por {efeito['duracao']} turno(s).")
+    return linhas
 
 
 # estado das dungeons
@@ -3993,7 +4382,7 @@ def jogador_do_usuario(run, user_id):
 
 
 def separar_alvo_dungeon(run, texto: str, inimigos: bool = True):
-    """separa o sufixo que identifica um aliado ou inimigo do texto do comando."""
+    """separa um alvo pelo nome ou pelo inicio do nome, ignorando caixa e acentos."""
     if not run:
         return texto, None
     tokens = tokenizar(texto)
@@ -4003,9 +4392,10 @@ def separar_alvo_dungeon(run, texto: str, inimigos: bool = True):
     for fid in run["jogadores"]:
         ficha = get_ficha_id(fid)
         if ficha:
-            candidatos.append((ficha["nome"], ("j", fid)))
+            candidatos.append({"nome": ficha["nome"], "ref": ("j", fid)})
     if inimigos:
-        candidatos.extend((monstro["nome"], ("m", i)) for i, monstro in enumerate(run["inimigos"]))
+        candidatos.extend({"nome": monstro["nome"], "ref": ("m", i)}
+                          for i, monstro in enumerate(run["inimigos"]))
     encontrados = []
     for i, (_, inicio) in enumerate(tokens):
         prefixo = texto[:inicio].strip()
@@ -4017,9 +4407,12 @@ def separar_alvo_dungeon(run, texto: str, inimigos: bool = True):
             idx = int(numero.group(1)) - 1
             if 0 <= idx < len(run["inimigos"]):
                 encontrados.append((len(sufixo), prefixo, ("m", idx)))
-        for nome, ref in candidatos:
-            if norm(sufixo) == norm(nome):
-                encontrados.append((len(nome), prefixo, ref))
+        correspondencias = candidatos_nome(candidatos, sufixo, substring=False)
+        if len(correspondencias) == 1:
+            encontrados.append((len(sufixo), prefixo, correspondencias[0]["ref"]))
+        elif len(correspondencias) > 1:
+            nomes = sorted({alvo["nome"] for alvo in correspondencias}, key=norm)
+            encontrados.append((len(sufixo), prefixo, ("a", nomes)))
     if not encontrados:
         return texto, None
     _, prefixo, ref = max(encontrados, key=lambda candidato: candidato[0])
@@ -4040,10 +4433,13 @@ def texto_painel(run) -> str:
     linhas = []
     for i, m in enumerate(run["inimigos"], 1):
         if inimigo_vivo(m):
-            perfil = PERSONALIDADES_MONSTRO[m["personalidade"]]
+            condicoes = [
+                f"{ICONE_CONDICAO[e['condicao']]}{e['duracao']}"
+                for e in m.get("efeitos", []) if e.get("condicao") in CONDICOES
+            ]
+            marca_status = " · " + " ".join(condicoes) if condicoes else ""
             linhas.append(f"{i}. {'👑 ' if m['chefe'] else ''}**{m['nome']}** — corpo {m['corpo']}/{m['vigor']} • "
-                          f"mente {m['mente']}/{m['vontade']} • {perfil['icone']} {perfil['nome']} "
-                          f"({m['habilidade']})")
+                          f"mente {m['mente']}/{m['vontade']}{marca_status}")
         elif m.get("fugiu"):
             linhas.append(f"{i}. ~~{m['nome']}~~ 🏃 fugiu")
         else:
@@ -4053,9 +4449,22 @@ def texto_painel(run) -> str:
         f = get_ficha_id(fid)
         if f:
             vigor, vontade = maximos(f, {})
-            icone = "🏃" if run["jogadores"][fid].get("fugiu") else "🛡️"
+            icone = ("🏃" if run["jogadores"][fid].get("fugiu")
+                     else "💤" if f["mente"] <= 0 else "🛡️")
+            condicoes = [
+                (json.loads(r["bonus"])["tipo"], r["duracao"])
+                for r in db.execute(
+                    "SELECT bonus, duracao FROM status WHERE ficha_id=? AND tipo='condicao' ORDER BY id",
+                    (fid,),
+                )
+            ]
+            marca_status = (" · " + " ".join(
+                f"{ICONE_CONDICAO[tipo]}{duracao or '∞'}" for tipo, duracao in condicoes
+            )) if condicoes else ""
             linhas.append(f"{icone} **{f['nome']}** — corpo {f['corpo']}/{vigor} • mente {f['mente']}/{vontade}"
-                          + (" (fugiu da luta)" if icone == "🏃" else ""))
+                          f"{marca_status}"
+                          + (" (fugiu da luta)" if icone == "🏃"
+                             else " (desmaiado)" if icone == "💤" else ""))
     return "\n".join(linhas)
 
 
@@ -4090,6 +4499,56 @@ def verificar_mortes(run) -> list:
             run["resumo"][fid]["fim"] = "morreu"
             linhas.append(f"💀 **{f['nome']}** morreu na dungeon. a ficha foi apagada para sempre.")
     return linhas
+
+
+def matar_desmaiados_em_combate(run):
+    combatentes = []
+    for fid, participante in run["jogadores"].items():
+        if participante.get("fugiu"):
+            continue
+        ficha = get_ficha_id(fid)
+        if ficha and ficha["corpo"] > 0:
+            combatentes.append(ficha)
+    if not combatentes or any(ficha["mente"] > 0 for ficha in combatentes):
+        return None
+
+    linhas = ["💤 todo o grupo ainda em combate desmaiou; os personagens desmaiados morreram."]
+    for ficha in combatentes:
+        db.execute("DELETE FROM fichas WHERE id=?", (ficha["id"],))
+        db.commit()
+        renumerar(run["guild"], ficha["dono_id"])
+        del run["jogadores"][ficha["id"]]
+        run["resumo"][ficha["id"]]["fim"] = "morreu"
+        linhas.append(f"💀 **{ficha['nome']}** morreu na dungeon. a ficha foi apagada para sempre.")
+    return linhas
+
+
+def despertar_desmaiados_no_acampamento(run, ultimo: bool) -> list:
+    if ultimo:
+        return []
+    despertos = []
+    for fid, participante in run["jogadores"].items():
+        if participante.get("fugiu"):
+            continue
+        ficha = get_ficha_id(fid)
+        if ficha and ficha["corpo"] > 0 and ficha["mente"] <= 0:
+            db.execute("UPDATE fichas SET mente=1 WHERE id=?", (fid,))
+            despertos.append(ficha["nome"])
+    db.commit()
+    return despertos
+
+
+def recuperar_jogadores_dungeon(run) -> list:
+    recuperados = []
+    for fid in run["jogadores"]:
+        ficha = get_ficha_id(fid)
+        if not ficha:
+            continue
+        vigor, vontade = maximos(ficha, get_bonus(fid))
+        db.execute("UPDATE fichas SET corpo=?, mente=? WHERE id=?", (vigor, vontade, fid))
+        recuperados.append(ficha["nome"])
+    db.commit()
+    return recuperados
 
 
 def gerar_inimigos(run) -> list:
@@ -4156,6 +4615,11 @@ async def processar_ordem(ctx, run, buf=None):
         if not any(inimigo_vivo(m) for m in run["inimigos"]):
             await vitoria_andar(ctx, run, buf)
             return
+        mortes_desmaio = matar_desmaiados_em_combate(run)
+        if mortes_desmaio is not None:
+            buf += mortes_desmaio
+            await fim_dungeon(ctx, run, "derrota", buf)
+            return
         if not ativos(run):   # todos fugiram da batalha: voltam ao acampamento, a dungeon continua
             run["estado"], run["repetir"] = "pausa", True
             for p in run["jogadores"].values():
@@ -4170,7 +4634,7 @@ async def processar_ordem(ctx, run, buf=None):
             m = run["inimigos"][ref]
             if inimigo_vivo(m):
                 buf += acao_monstro(run, m)
-                buf += processar_efeitos_monstro(m)
+                buf += processar_efeitos_monstro(run, m)
                 buf += verificar_mortes(run)
             avancar_pos(run)
             continue
@@ -4178,6 +4642,29 @@ async def processar_ordem(ctx, run, buf=None):
             avancar_pos(run)
             continue
         f = get_ficha_id(ref)
+        if f["mente"] <= 0:
+            buf.append(f"💤 **{f['nome']}** está desmaiado (mente em 0) e perde a vez.")
+            efeitos_turno = [linha for linha in processar_turno(f) if linha != "sem efeitos neste turno."]
+            if efeitos_turno:
+                buf.append(f"⏭️ **{f['nome']}** — fim do turno: " + " • ".join(efeitos_turno))
+            buf += verificar_mortes(run)
+            avancar_pos(run)
+            continue
+        condicoes = [
+            json.loads(status_ativo["bonus"])
+            for status_ativo in db.execute(
+                "SELECT bonus FROM status WHERE ficha_id=? AND tipo='condicao'", (f["id"],)
+            )
+        ]
+        condicao = condicao_impede_acao(condicoes)
+        if condicao:
+            buf.append(f"⚠️ **{f['nome']}** está sob **{condicao}** e perde a ação.")
+            efeitos_turno = [linha for linha in processar_turno(f) if linha != "sem efeitos neste turno."]
+            if efeitos_turno:
+                buf.append(f"⏭️ **{f['nome']}** — fim do turno: " + " • ".join(efeitos_turno))
+            buf += verificar_mortes(run)
+            avancar_pos(run)
+            continue
         buf.append(f"➡️ **rodada {run['rodada']}** — vez de **{f['nome']}** (<@{run['jogadores'][ref]['user']}>)\n"
                    + texto_painel(run)
                    + "\n`!atacar [alvo] [tipo]` ou `!atacar [alvo] [habilidade]` • "
@@ -4234,7 +4721,7 @@ async def vitoria_andar(ctx, run, buf):
         itens = sortear_loot(run["dif"], ultimo, rel)
         for it in itens:
             dar_item(fid, it)
-            res["itens"].append(it["nome"])
+            res["itens"].append(nome_exibicao_item(it["nome"]))
         partes = []
         destaque = " 🏅" if len(lutando) > 1 and soma > 0 and pont[fid] == melhor else ""
         luta = f"(abates {c.get('abates', 0)}, dano {c['dano']}, acertos {c['acertos']})"
@@ -4245,11 +4732,13 @@ async def vitoria_andar(ctx, run, buf):
             partes.append(f"(nivel livre: sem xp) +{moedas_p} 💰 {luta}{destaque}")
         if itens:
             partes.append("itens: " + ", ".join(
-                f"**{it['nome']}** [{fmt_bonus(it['bonus'])}]" for it in itens))
+                f"**{nome_exibicao_item(it['nome'])}** [{fmt_bonus(it['bonus'])}]" for it in itens))
         buf.append(f"🎁 **{f['nome']}**: " + " • ".join(partes))
         buf += dar_xp(fid, xp_p)
         registrar_historico(fid, p["user"], f"dungeon {run['tema']} andar {andar}: +{xp_p} xp, +{moedas_p} moedas"
-                            + (", " + ", ".join(it["nome"] for it in itens) if itens else ""))
+                            + (", " + ", ".join(nome_exibicao_item(it["nome"]) for it in itens) if itens else ""))
+    for nome in despertar_desmaiados_no_acampamento(run, ultimo):
+        buf.append(f"💤 **{nome}** desperta no acampamento com 1 ponto de mente.")
     for p in run["jogadores"].values():
         p["fugiu"] = False
     if ultimo:
@@ -4275,6 +4764,11 @@ async def fim_dungeon(ctx, run, motivo: str, buf=None):
               "saiu": "🚪 **o grupo deixou a dungeon.**", "cancelada": "❌ **dungeon cancelada.**"}[motivo]
     if motivo != "vitoria":
         buf.append(titulo)
+    else:
+        recuperados = recuperar_jogadores_dungeon(run)
+        if recuperados:
+            buf.append("✨ ao concluir a dungeon, todos recuperaram 100% do corpo e da mente: "
+                       + ", ".join(f"**{nome}**" for nome in recuperados) + ".")
     mvp = None
     if motivo == "vitoria":
         mvp = escolher_mvp(run)
@@ -4388,8 +4882,8 @@ def ev_item(run, fid, chance_equip=0.0, it=None) -> str:
     chance_equip = max(chance_equip, DIFICULDADES[run["dif"]]["chance_equip"])
     it = it or (gerar_equip(run["dif"]) if random.random() < chance_equip else gerar_consumivel(run["dif"]))
     dar_item(fid, it)
-    run["resumo"][fid]["itens"].append(it["nome"])
-    return f"**{it['nome']}** [{fmt_bonus(it['bonus'])}]"
+    run["resumo"][fid]["itens"].append(nome_exibicao_item(it["nome"]))
+    return f"**{nome_exibicao_item(it['nome'])}** [{fmt_bonus(it['bonus'])}]"
 
 
 def ev_dano(run, fid, campo="corpo", mult=1.0) -> str:
@@ -4557,13 +5051,13 @@ def evento_fonte(run):
 
     def encher(run, fid):
         if random.random() < 0.5:
-            return [f"🫙 o frasco se enche de um liquido brilhante: {ev_item(run, fid, it=CATALOGO['Pocao de Cura'])}"]
+            return [f"🫙 o frasco se enche de um líquido brilhante: {ev_item(run, fid, it=CATALOGO['Poção de Cura'])}"]
         return ["🫙 o frasco racha na hora e a agua escorre pelos dedos."]
 
     return {"titulo": "⛲ **uma fonte de agua brilhante** borbulha no meio da sala.",
             "opcoes": [_op("beber", "beber direto (60% cura, 40% dano mental)", beber),
                        _op("analisar", "analisar a agua (teste de int: cura pessoal)", analisar),
-                       _op("encher", "encher um frasco (50% de virar pocao)", encher),
+                       _op("encher", "encher um frasco (50% de virar poção)", encher),
                        _op("ignorar", "seguir sem beber", ignorar)]}
 
 
@@ -4587,10 +5081,10 @@ def evento_mercador(run):
         return [f"🗣️ {t} — o mercador se ofende, recolhe tudo e some na escuridao."]
 
     return {"titulo": "🧙 **um mercador encapuzado** abre a mochila no meio do acampamento.",
-            "opcoes": [_op("pocao", f"comprar **{cons['nome']}** por {p_cons} 💰 (30% off)", compra(cons, p_cons)),
+            "opcoes": [_op("pocao", f"comprar **{nome_exibicao_item(cons['nome'])}** por {p_cons} 💰 (30% off)", compra(cons, p_cons)),
                        _op("equipamento", f"comprar **{equip['nome']}** [{fmt_bonus(equip['bonus'])}] por {p_equip} 💰",
                            compra(equip, p_equip)),
-                       _op("barganhar", f"pedir a {cons['nome']} de graca (teste de car)", barganhar),
+                       _op("barganhar", f"pedir a {nome_exibicao_item(cons['nome'])} de graça (teste de car)", barganhar),
                        _op("ignorar", "dispensar o mercador", ignorar)]}
 
 
@@ -4893,8 +5387,8 @@ async def validar_entrada(ctx, f) -> bool:
     return True
 
 
-AVISO_MORTE = ("se **{nome}** (nivel {nivel}) chegar a corpo 0 na dungeon, a ficha e **apagada para sempre** "
-               "(nao da para restaurar). entrar mesmo assim?")
+AVISO_MORTE = ("se **{nome}** (nivel {nivel}) chegar a corpo 0, ou todo o grupo ainda em combate desmaiar, "
+               "as fichas dos mortos serao **apagadas para sempre** (nao da para restaurar). entrar mesmo assim?")
 
 
 def texto_lobby(run) -> str:
@@ -5101,7 +5595,7 @@ async def dungeon(ctx, *, raw: str = ""):
             "**Dificuldades sugeridas**\n"
             f"{dificuldades}\n\n"
             f"**Temas disponíveis:** {temas}\n\n"
-            "⚠️ **Risco permanente:** se o corpo chegar a 0, a ficha será apagada e não poderá ser restaurada.\n"
+            "⚠️ **Risco permanente:** corpo em 0 ou todo o grupo ainda em combate desmaiado apaga as fichas dos mortos.\n"
             "Cada andar vencido concede XP, moedas e uma chance de encontrar itens. O último andar tem um chefe; "
             "ele sempre deixa equipamento.\n\n"
             "**Eventos e ranking**\n"
@@ -5267,9 +5761,16 @@ async def atacar(ctx, *, raw: str = ""):
                         await ctx.send(f"**{hab['nome']}** nao altera {ATRIBUTOS[acerto]} nem {attrs_dano}. "
                                        "se ela so cura (crp/mnt), use `!usarh`.")
                         return
+                erro_uso = validar_uso_habilidade(f, hab)
+                if erro_uso:
+                    await ctx.send(f"nao foi possivel usar **{hab['nome']}**: {erro_uso}")
+                    return
         linhas = acao_ataque(f, m, acerto, dano, nome_hab, ba, bd,
                              reg=run["contrib"].setdefault(fid, {"dano": 0, "acertos": 0, "abates": 0}),
-                             tot=run["resumo"][fid])
+                             tot=run["resumo"][fid],
+                             efeitos_status=json.loads(hab["efeitos"] or "[]") if hab else None)
+        if hab:
+            linhas += pagar_custo_habilidade(f, hab)
         await fim_da_acao(ctx, run, fid, linhas)
 
 
@@ -5283,6 +5784,10 @@ async def usar(ctx, *, raw: str = ""):
         if fid is None:
             return
         nome_txt, alvo_ref = separar_alvo_dungeon(run, raw, inimigos=False)
+        if alvo_ref and alvo_ref[0] == "a":
+            await ctx.send("alvo ambiguo: " + ", ".join(f"**{nome}**" for nome in alvo_ref[1])
+                           + ". escreva mais do nome.")
+            return
         nome = nome_txt.strip().strip(ASPAS).strip()
         if not nome:
             await ctx.send("uso: `!usar [consumível] [alvo aliado opcional]` (gasta o seu turno)")
@@ -5302,7 +5807,7 @@ async def usar(ctx, *, raw: str = ""):
             await ctx.send(f"use `!usarh {hab['nome']}` para ativar a habilidade durante o combate.")
             return
         elif item:
-            await ctx.send(f"**{item['nome']}** e normal; equipe no acampamento com `!equipar`.")
+            await ctx.send(f"**{nome_exibicao_item(item['nome'])}** e normal; equipe no acampamento com `!equipar`.")
             return
         else:
             await ctx.send(msg_nao_tem(f, "item", nome))

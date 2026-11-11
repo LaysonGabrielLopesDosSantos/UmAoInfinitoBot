@@ -2,6 +2,7 @@
   "habilidades": [
     {
       "nome": "Lâmina do Vendaval",
+      "descricao": "Um corte veloz que combina força e combate.",
       "bonus": {"combate": 2, "forca": 4},
       "duracao": 1,
       "modo": "perto",
@@ -9,6 +10,7 @@
     },
     {
       "nome": "Impacto de Aço",
+      "descricao": "Um golpe pesado, feito para atravessar a defesa.",
       "bonus": {"combate": 4, "forca": 3},
       "duracao": 1,
       "modo": "perto",
@@ -16,6 +18,7 @@
     },
     {
       "nome": "Flecha Ricochete",
+      "descricao": "Um disparo preciso que ganha força ao ricochetear.",
       "bonus": {"precisao": 3, "forca": 4, "inteligencia": 2},
       "duracao": 1,
       "modo": "longe",
@@ -23,6 +26,7 @@
     },
     {
       "nome": "Arremesso Gravitacional",
+      "descricao": "Uma rajada distante guiada por controle gravitacional.",
       "bonus": {"precisao": 2, "forca": 2, "inteligencia": 6},
       "duracao": 1,
       "modo": "longe",
@@ -30,48 +34,66 @@
     },
     {
       "nome": "Chama Arcana",
+      "descricao": "Projeta uma chama mágica concentrada.",
       "bonus": {"precisao": 3, "inteligencia": 5},
       "duracao": 1,
       "modo": "magia",
-      "preco": 105
+      "preco": 105,
+      "efeitos": [{"tipo": "queimadura", "intensidade": 3, "duracao": 2}]
     },
     {
       "nome": "Orbe Glacial",
+      "descricao": "Dispara uma esfera de energia congelante.",
       "bonus": {"precisao": 4, "inteligencia": 4},
       "duracao": 1,
       "modo": "magia",
-      "preco": 115
+      "preco": 115,
+      "efeitos": [{"tipo": "congelamento", "intensidade": 1, "duracao": 1, "chance": 35}]
     },
     {
       "nome": "Punho de Ruptura",
+      "descricao": "Concentra energia em um golpe de curta distância.",
       "bonus": {"combate": 3, "forca": 4, "inteligencia": 2},
       "duracao": 1,
       "modo": "jujutsu",
-      "preco": 105
+      "preco": 105,
+      "requisitos": {"forca": 2},
+      "custos": {"mente": 3},
+      "efeitos": [{"tipo": "sangramento", "intensidade": 2, "duracao": 2, "chance": 35}]
     },
     {
       "nome": "Golpe Interno",
+      "descricao": "Um golpe técnico que atinge o alvo por dentro.",
       "bonus": {"combate": 4, "forca": 2, "inteligencia": 6},
       "duracao": 1,
       "modo": "jujutsu",
-      "preco": 130
+      "preco": 130,
+      "requisitos": {"inteligencia": 4},
+      "custos": {"mente": 5}
     },
     {
       "nome": "Foco de Batalha",
+      "descricao": "Eleva a concentração e a força de um aliado por alguns turnos.",
       "bonus": {"combate": 3, "forca": 2},
       "duracao": 3,
       "modo": "mel",
-      "preco": 120
+      "preco": 120,
+      "requisitos": {"combate": 2},
+      "custos": {"mente": 4}
     },
     {
       "nome": "Passo Veloz",
+      "descricao": "Melhora a movimentação e a precisão de um aliado por alguns turnos.",
       "bonus": {"agilidade": 3, "precisao": 2},
       "duracao": 3,
       "modo": "mel",
-      "preco": 115
+      "preco": 115,
+      "requisitos": {"agilidade": 2},
+      "custos": {"mente": 3}
     },
     {
       "nome": "Pulso Restaurador",
+      "descricao": "Recupera parte do corpo do alvo.",
       "bonus": {"corpo": "25%"},
       "duracao": 1,
       "modo": "mel",
@@ -79,6 +101,7 @@
     },
     {
       "nome": "Bênção Revigorante",
+      "descricao": "Recupera parte do corpo e da mente do alvo.",
       "bonus": {"corpo": "20%", "mente": "20%"},
       "duracao": 1,
       "modo": "mel",
@@ -86,6 +109,7 @@
     },
     {
       "nome": "Marca de Fraqueza",
+      "descricao": "Reduz a resistência e a força do inimigo.",
       "bonus": {"resistencia": -2, "forca": -2},
       "duracao": 3,
       "modo": "pen",
@@ -93,13 +117,16 @@
     },
     {
       "nome": "Névoa Desorientadora",
+      "descricao": "Dificulta a precisão e o combate do inimigo.",
       "bonus": {"precisao": -3, "combate": -2},
       "duracao": 3,
       "modo": "pen",
-      "preco": 130
+      "preco": 130,
+      "efeitos": [{"tipo": "paralisia", "intensidade": 1, "duracao": 2, "chance": 25}]
     },
     {
       "nome": "Couraça Espiritual",
+      "descricao": "Fortalece a resistência e a força de um aliado.",
       "bonus": {"resistencia": 3, "forca": 1},
       "duracao": 3,
       "modo": "mel",
@@ -107,6 +134,7 @@
     },
     {
       "nome": "Mira Serena",
+      "descricao": "Aprimora a precisão e a agilidade de um aliado.",
       "bonus": {"precisao": 3, "agilidade": 2},
       "duracao": 3,
       "modo": "mel",
@@ -114,6 +142,7 @@
     },
     {
       "nome": "Vontade Inquebrável",
+      "descricao": "Reforça a sabedoria e a resistência de um aliado.",
       "bonus": {"sabedoria": 3, "resistencia": 2},
       "duracao": 3,
       "modo": "mel",
@@ -121,13 +150,16 @@
     },
     {
       "nome": "Correntes de Sombra",
+      "descricao": "Prende o inimigo e reduz sua agilidade.",
       "bonus": {"agilidade": -3},
       "duracao": 3,
       "modo": "pen",
-      "preco": 135
+      "preco": 135,
+      "efeitos": [{"tipo": "congelamento", "intensidade": 1, "duracao": 1, "chance": 30}]
     },
     {
       "nome": "Selo Enfraquecedor",
+      "descricao": "Reduz a resistência e a força do inimigo.",
       "bonus": {"resistencia": -3, "forca": -2},
       "duracao": 3,
       "modo": "pen",
@@ -135,10 +167,71 @@
     },
     {
       "nome": "Drenagem Arcana",
+      "descricao": "Drena a inteligência e a sabedoria do inimigo.",
       "bonus": {"inteligencia": -3, "sabedoria": -2},
       "duracao": 3,
       "modo": "pen",
       "preco": 160
+    },
+    {
+      "nome": "Investida Brutal",
+      "descricao": "Uma investida direta que transforma força em impacto.",
+      "bonus": {"combate": 5, "forca": 5},
+      "duracao": 1,
+      "modo": "perto",
+      "preco": 175,
+      "requisitos": {"forca": 3},
+      "custos": {"corpo": 3}
+    },
+    {
+      "nome": "Lança de Energia",
+      "descricao": "Lança energia concentrada contra um alvo distante.",
+      "bonus": {"precisao": 5, "inteligencia": 6},
+      "duracao": 1,
+      "modo": "magia",
+      "preco": 180,
+      "requisitos": {"inteligencia": 4},
+      "custos": {"mente": 6}
+    },
+    {
+      "nome": "Cura Profunda",
+      "descricao": "Restaura uma parcela significativa do corpo do aliado.",
+      "bonus": {"corpo": "35%"},
+      "duracao": 1,
+      "modo": "mel",
+      "preco": 180,
+      "requisitos": {"sabedoria": 3},
+      "custos": {"mente": 7}
+    },
+    {
+      "nome": "Reflexos de Éter",
+      "descricao": "Aumenta a agilidade e a precisão de um aliado por dois turnos.",
+      "bonus": {"agilidade": 4, "precisao": 2},
+      "duracao": 2,
+      "modo": "mel",
+      "preco": 170,
+      "requisitos": {"agilidade": 3},
+      "custos": {"mente": 4}
+    },
+    {
+      "nome": "Ruína da Mente",
+      "descricao": "Enfraquece a inteligência e a sabedoria do inimigo.",
+      "bonus": {"inteligencia": -4, "sabedoria": -3},
+      "duracao": 2,
+      "modo": "pen",
+      "preco": 185,
+      "requisitos": {"inteligencia": 3},
+      "custos": {"mente": 5}
+    },
+    {
+      "nome": "Quebra-Guarda",
+      "descricao": "Abre a defesa do inimigo, reduzindo resistência e combate.",
+      "bonus": {"resistencia": -3, "combate": -2},
+      "duracao": 2,
+      "modo": "pen",
+      "preco": 175,
+      "requisitos": {"combate": 3},
+      "custos": {"mente": 4}
     }
   ]
 }
