@@ -97,6 +97,48 @@
       "duracao": 3,
       "modo": "pen",
       "preco": 130
+    },
+    {
+      "nome": "Couraça Espiritual",
+      "bonus": {"resistencia": 3, "forca": 1},
+      "duracao": 3,
+      "modo": "mel",
+      "preco": 140
+    },
+    {
+      "nome": "Mira Serena",
+      "bonus": {"precisao": 3, "agilidade": 2},
+      "duracao": 3,
+      "modo": "mel",
+      "preco": 145
+    },
+    {
+      "nome": "Vontade Inquebrável",
+      "bonus": {"sabedoria": 3, "resistencia": 2},
+      "duracao": 3,
+      "modo": "mel",
+      "preco": 150
+    },
+    {
+      "nome": "Correntes de Sombra",
+      "bonus": {"agilidade": -3},
+      "duracao": 3,
+      "modo": "pen",
+      "preco": 135
+    },
+    {
+      "nome": "Selo Enfraquecedor",
+      "bonus": {"resistencia": -3, "forca": -2},
+      "duracao": 3,
+      "modo": "pen",
+      "preco": 155
+    },
+    {
+      "nome": "Drenagem Arcana",
+      "bonus": {"inteligencia": -3, "sabedoria": -2},
+      "duracao": 3,
+      "modo": "pen",
+      "preco": 160
     }
   ]
 }

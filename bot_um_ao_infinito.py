@@ -1009,7 +1009,7 @@ AJUDA = [
     ("itens", "transferir", "!transferir [pers] [item] [qtd|tudo] [destino]", "passa itens de uma ficha sua para outra ficha (de qualquer jogador); dentro da dungeon so entre o mesmo grupo e fora do combate", "!transferir \"Pocao de Cura\" 2 Douma"),
     ("economia", "saldo", "!saldo [pers]", "mostra as moedas da ficha; elas vem das dungeons, dos eventos e das vendas", ""),
     ("economia", "pix", "!pix [pers] [moedas] [destino]", "transfere moedas para outra ficha; dentro da dungeon, so entre o mesmo grupo e fora do combate", "!pix Kage 50 Douma"),
-    ("economia", "loja", "!loja", "mostra os itens e habilidades a venda e seus precos (equipamentos melhores pedem nivel minimo)", ""),
+    ("economia", "loja", "!loja [itens|habilidades]", "mostra os itens da loja, as habilidades disponiveis ou o catalogo completo", "!loja habilidades"),
     ("economia", "comprar", "!comprar [pers] [item|habilidade] [qtd]", "compra um item (com quantidade) ou aprende uma habilidade da loja; nao funciona dentro de dungeon", "!comprar pocao de cura 3"),
     ("economia", "vender", "!vender [pers] [item] [qtd|tudo]", "vende pela metade do preco; so itens comprados ou achados nas dungeons/eventos (nao os criados com !pegar)", "!vender espada de ferro"),
     ("economia", "darmoedas", "!darmoedas [pers] [quantidade]", "admin: da (ou tira, com -) moedas de uma ficha", "!darmoedas kage 200"),
@@ -1042,7 +1042,7 @@ AJUDA = [
     ("dungeon", "dungeon ranking", "!dungeon ranking", "ranking da dungeon atual: abates, dano e acertos de cada um; no fim o mvp ganha moedas extras", ""),
     ("dungeon", "escolher", "!escolher [numero ou opcao]", "em eventos de grupo, todos votam e o efeito atinge o grupo; em eventos individuais, apenas o explorador indicado escolhe e recebe o efeito", "!escolher examinar"),
     ("dungeon", "ranking", "!ranking [abates|mvp|dano|vitorias]", "ranking do servidor somando todas as dungeons", "!ranking mvp"),
-    ("dungeon", "atacar", "!atacar [alvo] [perto|longe|magia|jujutsu] [habilidade opcional]", "perto: combate+for; longe: precisao+for+metade da int; magia: precisao+int; jujutsu: combate+for+metade da int; metade da int arredonda para baixo e todo dano tira corpo", "!atacar 2 jujutsu Pesadelo"),
+    ("dungeon", "atacar", "!atacar [alvo] [tipo ou habilidade]", "Informe o tipo do ataque (perto, longe, magia ou jujutsu) ou o nome de uma habilidade de ataque para usar o tipo dela automaticamente. Perto: combate+for; longe: precisao+for+metade da int; magia: precisao+int; jujutsu: combate+for+metade da int. Metade da int arredonda para baixo e todo dano tira corpo.", "!atacar 2 Punho de Ruptura"),
     ("dungeon", "usar", "!usar [consumível] [alvo aliado opcional]", "gasta a vez usando um consumível da sua ficha; pode aplicar em qualquer aliado do grupo", "!usar \"Pocao de Cura\" Douma"),
     ("dungeon", "descansar", "!descansar [crp|mnt]", "em combate gasta a vez e recupera vigor/20 (ou vontade/20); no acampamento recupera 20%, uma vez por pessoa", "!descansar mnt"),
     ("dungeon", "fugir", "!fugir", "foge so da batalha (a dungeon continua): rola agilidade contra o inimigo mais agil e so falha se perder por mais de 4; "
@@ -2309,45 +2309,56 @@ async def darmoedas(ctx, *, raw: str = ""):
     await ctx.send(f"💰 **{f['nome']}** — moedas: {f['moedas']} → {novo}")
 
 
-def texto_loja() -> str:
-    linhas = [
-        "🏪 **Loja**",
-        "Compre com `!comprar [personagem] [item ou habilidade] [quantidade]`.",
-        "Venda com `!vender [personagem] [item] [quantidade ou tudo]` · a loja paga metade do preço.",
-        "",
-        "**Consumíveis** · usados para recuperar corpo ou mente",
-    ]
-    for nome in CONSUMIVEIS:
-        c = CATALOGO[nome]
-        linhas.append(f"• **{nome}** — {c['preco']} 💰 ({fmt_bonus(c['bonus'])})")
-    linhas += ["", "**Equipamentos** · o bônus aumenta conforme a raridade"]
-    for base, gen, attrs in EQUIPAMENTOS:
-        precos = []
-        for t in range(3):
-            c = CATALOGO[nome_equip(base, gen, t)]
-            nivel = f" · nível mínimo {c['nivel']}" if c["nivel"] > 1 else ""
-            precos.append(f"  • {TIERS[t][0 if gen == 'm' else 1]} · {c['preco']} 💰"
-                          f" · bônus: {fmt_bonus(c['bonus'])}{nivel}")
-        linhas.append(f"**{base}**\n" + "\n".join(precos))
-    linhas.append(f"Equipamentos lendários só aparecem nas dungeons. "
-                  f"A loja paga {PRECO_TIER[3] // 2} 💰 por eles.")
-    linhas += ["", "**Habilidades** · aprenda com `!comprar [personagem] [habilidade]`"]
-    if HABILIDADES_LOJA:
-        for habilidade in HABILIDADES_LOJA:
-            linhas.append(
-                f"• **{habilidade['nome']}** · {habilidade['preco']} 💰\n"
-                f"  Efeito: {fmt_bonus(habilidade['bonus'])} · "
-                f"Duração: {fmt_duracao_hab(habilidade['bonus'], habilidade['duracao'])} · "
-                f"Tipo: {nome_tipo_habilidade(habilidade['modo'])}"
-            )
-    else:
-        linhas.append("• nenhuma habilidade disponivel no momento.")
+def texto_loja(secao: str = "tudo") -> str:
+    linhas = ["🏪 **Loja**"]
+    if secao in ("tudo", "itens"):
+        linhas += [
+            "Compre itens com `!comprar [personagem] [item] [quantidade]`.",
+            "Venda com `!vender [personagem] [item] [quantidade ou tudo]` · a loja paga metade do preço.",
+            "",
+            "**Consumíveis** · usados para recuperar corpo ou mente",
+        ]
+        for nome in CONSUMIVEIS:
+            c = CATALOGO[nome]
+            linhas.append(f"• **{nome}** — {c['preco']} 💰 ({fmt_bonus(c['bonus'])})")
+        linhas += ["", "**Equipamentos** · o bônus aumenta conforme a raridade"]
+        for base, gen, attrs in EQUIPAMENTOS:
+            precos = []
+            for t in range(3):
+                c = CATALOGO[nome_equip(base, gen, t)]
+                nivel = f" · nível mínimo {c['nivel']}" if c["nivel"] > 1 else ""
+                precos.append(f"  • {TIERS[t][0 if gen == 'm' else 1]} · {c['preco']} 💰"
+                              f" · bônus: {fmt_bonus(c['bonus'])}{nivel}")
+            linhas.append(f"**{base}**\n" + "\n".join(precos))
+        linhas.append(f"Equipamentos lendários só aparecem nas dungeons. "
+                      f"A loja paga {PRECO_TIER[3] // 2} 💰 por eles.")
+    if secao == "tudo":
+        linhas.append("")
+    if secao in ("tudo", "habilidades"):
+        linhas += [
+            "**Habilidades** · aprenda com `!comprar [personagem] [habilidade]` "
+            "(uma habilidade por compra)"
+        ]
+        if HABILIDADES_LOJA:
+            for habilidade in HABILIDADES_LOJA:
+                linhas.append(
+                    f"• **{habilidade['nome']}** · {habilidade['preco']} 💰\n"
+                    f"  Efeito: {fmt_bonus(habilidade['bonus'])} · "
+                    f"Duração: {fmt_duracao_hab(habilidade['bonus'], habilidade['duracao'])} · "
+                    f"Tipo: {nome_tipo_habilidade(habilidade['modo'])}"
+                )
+        else:
+            linhas.append("• Nenhuma habilidade disponível no momento.")
     return "\n".join(linhas)
 
 
 @bot.command(name="loja")
-async def loja(ctx):
-    await enviar_longo(ctx, texto_loja())
+async def loja(ctx, *, raw: str = ""):
+    secao = norm(raw.strip())
+    if secao not in ("", "itens", "habilidades"):
+        await ctx.send("Escolha uma seção: `!loja itens` ou `!loja habilidades`.")
+        return
+    await enviar_longo(ctx, texto_loja(secao or "tudo"))
 
 
 @bot.command(name="comprar")
@@ -3101,11 +3112,14 @@ async def usarhabilidade(ctx, *, raw: str = ""):
                 await fim_da_acao(ctx, run, fid, linhas)
                 return
             if hab["modo"] in MODOS_ATAQUE:
-                await ctx.send(f"**{hab['nome']}** usa o tipo **{hab['modo']}**; aplique-a com `!atacar [alvo] {hab['modo']} {hab['nome']}`.")
+                await ctx.send(
+                    f"**{hab['nome']}** usa o tipo **{hab['modo']}**; "
+                    f"aplique-a com `!atacar [alvo] {hab['modo']}/{hab['nome']}`."
+                )
                 return
             if alvo_ref:
                 await ctx.send(f"**{hab['nome']}** nao e melhoria nem penalidade; "
-                               "use `!atacar [alvo] [modo] [habilidade]`.")
+                               "use `!atacar [alvo] [tipo]/[habilidade]`.")
                 return
             linhas = ativar_habilidade(f, hab)
             await fim_da_acao(ctx, run, fid, [f"✨ **{f['nome']}** usou **{hab['nome']}**.", *linhas])
@@ -4166,7 +4180,7 @@ async def processar_ordem(ctx, run, buf=None):
         f = get_ficha_id(ref)
         buf.append(f"➡️ **rodada {run['rodada']}** — vez de **{f['nome']}** (<@{run['jogadores'][ref]['user']}>)\n"
                    + texto_painel(run)
-                   + "\n`!atacar [alvo] [perto|longe|magia|jujutsu] [habilidade]` • "
+                   + "\n`!atacar [alvo] [tipo]` ou `!atacar [alvo] [habilidade]` • "
                      "`!usar [item] [aliado opcional]` • `!usarh [habilidade] [alvo opcional]` • "
                      "`!descansar [crp|mnt]` • `!fugir` • `!passar`")
         await enviar_longo(ctx, "\n".join(buf))
@@ -5102,6 +5116,51 @@ async def dungeon(ctx, *, raw: str = ""):
 
 
 # comandos: acoes de combate
+def separar_tipo_habilidade_ataque(tokens):
+    for pos, (token, _) in enumerate(tokens):
+        tipo_txt, separador, habilidade = token.partition("/")
+        tipo = norm(tipo_txt)
+        if tipo in MODOS_ATAQUE:
+            partes_habilidade = ([habilidade] if separador else [])
+            partes_habilidade.extend(t for t, _ in tokens[pos + 1:])
+            return pos, tipo, " ".join(partes_habilidade).strip()
+    return None, None, ""
+
+
+def inferir_ataque_por_habilidade(tokens, ficha_id, vivos):
+    candidatos, habilidades_sem_ataque = [], []
+    inimigos_vivos = [monstro for _, monstro in vivos]
+    for pos in range(1, len(tokens)):
+        alvo_txt = " ".join(token for token, _ in tokens[:pos]).strip().strip(ASPAS).strip()
+        numero = re.fullmatch(r"#?(\d+)", alvo_txt)
+        if numero:
+            numero_alvo = int(numero.group(1)) - 1
+            alvo_i = next((i for i, _ in vivos if i == numero_alvo), None)
+            if alvo_i is None:
+                continue
+        else:
+            alvo = achar_nome(inimigos_vivos, alvo_txt)
+            if not alvo:
+                continue
+            alvo_i = next(i for i, monstro in vivos if monstro is alvo)
+
+        habilidade_txt = " ".join(token for token, _ in tokens[pos:]).strip().strip(ASPAS).strip()
+        habilidade = get_habilidade(ficha_id, habilidade_txt) if habilidade_txt else None
+        if not habilidade:
+            continue
+        if habilidade["modo"] in MODOS_ATAQUE:
+            candidatos.append((pos, alvo_i, habilidade))
+        else:
+            habilidades_sem_ataque.append(habilidade)
+
+    if candidatos:
+        _, alvo_i, habilidade = max(candidatos, key=lambda candidato: candidato[0])
+        return alvo_i, habilidade, None
+    if habilidades_sem_ataque:
+        return None, None, habilidades_sem_ataque[0]
+    return None, None, None
+
+
 async def validar_vez(ctx, run):
     fid = jogador_do_usuario(run, ctx.author.id)
     if fid is None:
@@ -5129,28 +5188,53 @@ async def atacar(ctx, *, raw: str = ""):
         f = get_ficha_id(fid)
         vivos = [(i, m) for i, m in enumerate(run["inimigos"]) if inimigo_vivo(m)]
         tokens = tokenizar(raw)
-        modo_pos = next((i for i, (t, _) in enumerate(tokens) if norm(t) in MODOS_ATAQUE), None)
-        if modo_pos is None or modo_pos == 0 or modo_pos < 0:
-                await ctx.send("uso: `!atacar [alvo] [perto|longe|magia|jujutsu] [habilidade opcional]`.")
+        modo_pos, modo, nome_hab_txt = separar_tipo_habilidade_ataque(tokens)
+        hab = None
+        alvo_i = None
+        if modo_pos is None:
+            alvo_i, hab, hab_incompativel = inferir_ataque_por_habilidade(tokens, fid, vivos)
+            if hab_incompativel:
+                await ctx.send(
+                    f"**{hab_incompativel['nome']}** nao e uma habilidade de ataque. "
+                    "Use `!usarh` para ativar melhorias e penalidades."
+                )
                 return
-        alvo_txt = " ".join(t for t, _ in tokens[:modo_pos]).strip().strip(ASPAS).strip()
-        modo = norm(tokens[modo_pos][0])
+            if hab is None:
+                await ctx.send(
+                    "uso: `!atacar [alvo] [perto|longe|magia|jujutsu]` ou "
+                    "`!atacar [alvo] [habilidade de ataque]`."
+                )
+                return
+            modo = hab["modo"]
+        elif modo_pos == 0:
+            await ctx.send(
+                "uso: `!atacar [alvo] [perto|longe|magia|jujutsu]` ou "
+                "`!atacar [alvo] [habilidade de ataque]`."
+            )
+            return
+        else:
+            alvo_txt = " ".join(t for t, _ in tokens[:modo_pos]).strip().strip(ASPAS).strip()
+            if "/" in tokens[modo_pos][0] and not nome_hab_txt:
+                await ctx.send("informe a habilidade após `/`, por exemplo: `!atacar 2 perto/Lâmina do Vendaval`.")
+                return
         acerto, dano = MODOS_ATAQUE[modo]
-        alvo_num = re.fullmatch(r"#?(\d+)", alvo_txt)
-        if alvo_num:
+        if alvo_i is None:
+            alvo_num = re.fullmatch(r"#?(\d+)", alvo_txt)
+            if alvo_num:
                 alvo_i = int(alvo_num.group(1)) - 1
                 if not 0 <= alvo_i < len(run["inimigos"]) or not inimigo_vivo(run["inimigos"][alvo_i]):
                     await ctx.send("esse inimigo nao existe ou ja caiu. veja os numeros no painel.")
                     return
-        else:
+            else:
                 alvo = achar_nome([m for _, m in vivos], alvo_txt)
                 if not alvo:
                     await ctx.send(f"nao encontrei o inimigo **{alvo_txt}**. use o numero ou nome exibido no painel.")
                     return
                 alvo_i = run["inimigos"].index(alvo)
-        nome_hab_txt = " ".join(t for t, _ in tokens[modo_pos + 1:]).strip().strip(ASPAS).strip()
-        hab = get_habilidade(fid, nome_hab_txt) if nome_hab_txt else None
-        if nome_hab_txt and not hab:
+        if hab is None:
+            nome_hab_txt = nome_hab_txt.strip().strip(ASPAS).strip()
+            hab = get_habilidade(fid, nome_hab_txt) if nome_hab_txt else None
+            if nome_hab_txt and not hab:
                 await ctx.send(msg_nao_tem(f, "habilidade", nome_hab_txt))
                 return
         m = run["inimigos"][alvo_i]
@@ -5159,7 +5243,7 @@ async def atacar(ctx, *, raw: str = ""):
         if hab:
                 if hab["modo"] in MODOS_ATAQUE and hab["modo"] != modo:
                     await ctx.send(f"**{hab['nome']}** e do tipo **{nome_tipo_habilidade(hab['modo'])}**; "
-                                   "use esse tipo em `!atacar`.")
+                                   f"use `!atacar [alvo] {hab['modo']}/{hab['nome']}`.")
                     return
                 bonus = json.loads(hab["bonus"])
                 nome_hab = hab["nome"]
