@@ -1,0 +1,102 @@
+{
+  "habilidades": [
+    {
+      "nome": "Lâmina do Vendaval",
+      "bonus": {"combate": 2, "forca": 4},
+      "duracao": 1,
+      "modo": "perto",
+      "preco": 90
+    },
+    {
+      "nome": "Impacto de Aço",
+      "bonus": {"combate": 4, "forca": 3},
+      "duracao": 1,
+      "modo": "perto",
+      "preco": 110
+    },
+    {
+      "nome": "Flecha Ricochete",
+      "bonus": {"precisao": 3, "forca": 4, "inteligencia": 2},
+      "duracao": 1,
+      "modo": "longe",
+      "preco": 100
+    },
+    {
+      "nome": "Arremesso Gravitacional",
+      "bonus": {"precisao": 2, "forca": 2, "inteligencia": 6},
+      "duracao": 1,
+      "modo": "longe",
+      "preco": 125
+    },
+    {
+      "nome": "Chama Arcana",
+      "bonus": {"precisao": 3, "inteligencia": 5},
+      "duracao": 1,
+      "modo": "magia",
+      "preco": 105
+    },
+    {
+      "nome": "Orbe Glacial",
+      "bonus": {"precisao": 4, "inteligencia": 4},
+      "duracao": 1,
+      "modo": "magia",
+      "preco": 115
+    },
+    {
+      "nome": "Punho de Ruptura",
+      "bonus": {"combate": 3, "forca": 4, "inteligencia": 2},
+      "duracao": 1,
+      "modo": "jujutsu",
+      "preco": 105
+    },
+    {
+      "nome": "Golpe Interno",
+      "bonus": {"combate": 4, "forca": 2, "inteligencia": 6},
+      "duracao": 1,
+      "modo": "jujutsu",
+      "preco": 130
+    },
+    {
+      "nome": "Foco de Batalha",
+      "bonus": {"combate": 3, "forca": 2},
+      "duracao": 3,
+      "modo": "mel",
+      "preco": 120
+    },
+    {
+      "nome": "Passo Veloz",
+      "bonus": {"agilidade": 3, "precisao": 2},
+      "duracao": 3,
+      "modo": "mel",
+      "preco": 115
+    },
+    {
+      "nome": "Pulso Restaurador",
+      "bonus": {"corpo": "25%"},
+      "duracao": 1,
+      "modo": "mel",
+      "preco": 100
+    },
+    {
+      "nome": "Bênção Revigorante",
+      "bonus": {"corpo": "20%", "mente": "20%"},
+      "duracao": 1,
+      "modo": "mel",
+      "preco": 135
+    },
+    {
+      "nome": "Marca de Fraqueza",
+      "bonus": {"resistencia": -2, "forca": -2},
+      "duracao": 3,
+      "modo": "pen",
+      "preco": 125
+    },
+    {
+      "nome": "Névoa Desorientadora",
+      "bonus": {"precisao": -3, "combate": -2},
+      "duracao": 3,
+      "modo": "pen",
+      "preco": 130
+    }
+  ]
+}
