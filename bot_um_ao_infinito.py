@@ -397,14 +397,31 @@ def achar_nome(rows, nome: str, chave: str = "nome", exato: bool = False, substr
 
 
 async def enviar_longo(ctx, texto: str):
-    while texto:
-        pedaco = texto[:1900]
-        if len(texto) > 1900:
-            corte = pedaco.rfind("\n")
-            if corte > 500:
-                pedaco = pedaco[:corte]
-        await ctx.send(pedaco)
-        texto = texto[len(pedaco):].lstrip("\n")
+    limite = 1800
+    paginas, atual = [], ""
+    for linha in texto.splitlines():
+        while len(linha) > limite:
+            corte = linha.rfind(" ", 0, limite + 1)
+            if corte <= 0:
+                corte = limite
+            parte, linha = linha[:corte], linha[corte:].lstrip()
+            if atual:
+                paginas.append(atual)
+                atual = ""
+            paginas.append(parte)
+        candidato = f"{atual}\n{linha}" if atual else linha
+        if len(candidato) > limite:
+            paginas.append(atual)
+            atual = linha
+        else:
+            atual = candidato
+    if atual or not paginas:
+        paginas.append(atual)
+
+    total = len(paginas)
+    for indice, pagina in enumerate(paginas, 1):
+        conteudo = pagina if total == 1 else f"📄 **Página {indice}/{total}**\n{pagina}"
+        await ctx.send(conteudo)
 
 
 def eh_admin(ctx) -> bool:
@@ -921,8 +938,8 @@ async def confirmar(ctx, texto: str) -> bool:
     if view.resultado is None:
         try:
             await msg.edit(content=f"⚠️ {texto}\n⌛ tempo esgotado, cancelado.", view=None)
-        except Exception:
-            pass
+        except discord.HTTPException as erro:
+            print(f"nao foi possivel atualizar a confirmacao expirada: {erro}")
         return False
     if not view.resultado:
         await ctx.send("cancelado.")
@@ -1058,15 +1075,27 @@ CATEGORIAS = ["fichas", "atributos", "xp", "combate", "dungeon", "itens", "econo
 async def ajuda(ctx, *, raw: str = ""):
     arg = norm(raw).lstrip("!").strip()
     if not arg:
-        linhas = [f"**{c}:** " + " ".join(f"`{e[1]}`" for e in AJUDA if e[0] == c) for c in CATEGORIAS]
-        await enviar_longo(ctx, "**ajuda** — use `!ajuda [categoria]` ou `!ajuda [comando]`\n" + "\n".join(linhas)
-                           + "\n\n**dicas:** nomes com espaco: use aspas • no lugar do nome vale a ordem (`#2`) ou so o "
-                             "comeco do nome (`Kage` para `KageYaeger`) • sem nome, vale a sua ficha #1 • valores aceitam % "
-                             "(`+crp 50%` = 50% do maximo; `+for 20%` = 20% do atributo)")
+        linhas = [f"**{c.title()}**\n" + " • ".join(f"`!{e[1]}`" for e in AJUDA if e[0] == c)
+                  for c in CATEGORIAS]
+        await enviar_longo(
+            ctx,
+            "📚 **Central de ajuda**\n"
+            "Consulte `!ajuda [categoria]` para ver os comandos de uma área ou `!ajuda [comando]` "
+            "para consultar um comando específico.\n\n"
+            + "\n\n".join(linhas)
+            + "\n\n**Dicas rápidas**\n"
+              "• Use aspas em nomes com espaços.\n"
+              "• Você pode indicar a ficha pela ordem (`#2`) ou pelo começo do nome.\n"
+              "• Se não informar a ficha, será usada a sua ficha #1.\n"
+              "• Alguns valores aceitam porcentagem: `+crp 50%` recupera metade do máximo; "
+              "`+for 20%` vale 20% do atributo."
+        )
         return
     if arg in CATEGORIAS:
-        linhas = [f"`{e[2]}` — {e[3]}" for e in AJUDA if e[0] == arg]
-        await enviar_longo(ctx, f"**{arg}**\n" + "\n".join(linhas))
+        entradas = [e for e in AJUDA if e[0] == arg]
+        blocos = [f"`{e[2]}`\n{e[3]}" + (f"\nExemplo: `{e[4]}`" if e[4] else "")
+                  for e in entradas]
+        await enviar_longo(ctx, f"📚 **Ajuda · {arg.title()}**\n\n" + "\n\n".join(blocos))
         return
     achados = [e for e in AJUDA if e[1] == arg]
     if not achados:
@@ -1083,9 +1112,9 @@ async def ajuda(ctx, *, raw: str = ""):
             await ajuda(ctx, raw=cats[0])
             return
     e = achados[0]
-    texto = f"**!{e[1]}** — {e[3]}\nuso: `{e[2]}`"
+    texto = f"📚 **Comando: !{e[1]}**\n\n**O que faz:** {e[3]}\n\n**Como usar:** `{e[2]}`"
     if e[4]:
-        texto += f"\nexemplo: `{e[4]}`"
+        texto += f"\n\n**Exemplo:** `{e[4]}`"
     await enviar_longo(ctx, texto)
 
 
@@ -1113,13 +1142,14 @@ async def fichas(ctx, *, raw: str = ""):
         await ctx.send(f"so existem {paginas} pagina(s).")
         return
     fatia = rows[(pagina - 1) * por_pagina: pagina * por_pagina]
-    linhas = [f"• **{r['nome']}** (nv {fmt_nivel(r['nivel'])}) — <@{r['dono_id']}> #{r['ordem']}" for r in fatia]
-    titulo = f"📚 **{len(rows)} ficha(s)**" + (f" de <@{dono.id}>" if dono else "")
+    linhas = [f"• **{r['nome']}** · nível {fmt_nivel(r['nivel'])} · ficha #{r['ordem']} · <@{r['dono_id']}>"
+              for r in fatia]
+    titulo = f"📚 **Fichas encontradas: {len(rows)}**" + (f" · jogador <@{dono.id}>" if dono else "")
     if paginas > 1:
-        titulo += f" — pagina {pagina}/{paginas}"
+        titulo += f" · página {pagina}/{paginas}"
     texto = titulo + "\n" + "\n".join(linhas)
     if pagina < paginas:
-        texto += f"\nmais: `!fichas [@pessoa] {pagina + 1}`"
+        texto += f"\n\nPróxima página: `!fichas [@pessoa] {pagina + 1}`"
     await enviar_longo(ctx, texto)
 
 
@@ -1311,8 +1341,9 @@ async def copiarficha(ctx, *, raw: str = ""):
         f"VALUES (?, ?, ?, 999999, {', '.join('?' for _ in cols)})",
         (ctx.guild.id, dono.id, nome, *[f[c] for c in cols]))
     novo_id = cur.lastrowid
-    db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo) "
-               "SELECT ?, nome, quantidade, bonus, equipado, tipo FROM itens WHERE ficha_id=?", (novo_id, f["id"]))
+    db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo, vendaveis) "
+               "SELECT ?, nome, quantidade, bonus, equipado, tipo, vendaveis FROM itens WHERE ficha_id=?",
+               (novo_id, f["id"]))
     db.execute("INSERT INTO status (ficha_id, nome, tipo, bonus, duracao) "
                "SELECT ?, nome, tipo, bonus, duracao FROM status WHERE ficha_id=?", (novo_id, f["id"]))
     db.execute("INSERT INTO notas (ficha_id, titulo, texto) "
@@ -1785,9 +1816,12 @@ async def dano(ctx, *, raw: str = ""):
     await ctx.send(texto)
 
 
-def desempatar(grupo):
+def desempatar(grupo, tentativas=0):
     """quem empatou rola agilidade de novo, repetindo entre os que continuarem empatados."""
     if len(grupo) == 1:
+        return grupo
+    if tentativas >= 20:
+        random.shuffle(grupo)
         return grupo
     for it in grupo:
         it.setdefault("desempates", []).append(rolar_attr(it["f"], "agilidade")["total"])
@@ -1797,7 +1831,7 @@ def desempatar(grupo):
         j = k
         while j < len(grupo) and grupo[j]["desempates"][-1] == grupo[k]["desempates"][-1]:
             j += 1
-        resultado.extend(desempatar(grupo[k:j]))
+        resultado.extend(desempatar(grupo[k:j], tentativas + 1))
         k = j
     return resultado
 
@@ -1867,14 +1901,21 @@ async def inventario(ctx, *, raw: str = ""):
     linhas = []
     for r in rows:
         bonus = fmt_bonus(json.loads(r["bonus"]))
-        venda = f" • 💱 {r['vendaveis']} vendavel(is)" if r["vendaveis"] else ""
+        venda = f" · 💱 {r['vendaveis']} disponível(is) para venda" if r["vendaveis"] else ""
         if r["tipo"] == "consumivel":
-            linhas.append(f"🍖 **{r['nome']}** x{r['quantidade']} [consumível] — {bonus}{venda}")
+            linhas.append(f"🍖 **{r['nome']}** · consumível · quantidade: {r['quantidade']}\n"
+                          f"   Efeito: {bonus}{venda}")
         else:
             marca = "🟢" if r["equipado"] > 0 else "⚪"
-            linhas.append(f"{marca} **{r['nome']}** x{r['quantidade']} ({r['equipado']} equipado(s)) [normal] — {bonus}{venda}")
-    await enviar_longo(ctx, f"🎒 **inventario de {f['nome']}** • 💰 {f['moedas']} moeda(s)\n"
-                            "(🟢 equipado • ⚪ guardado • 🍖 consumível • 💱 da para vender na loja)\n" + "\n".join(linhas))
+            linhas.append(f"{marca} **{r['nome']}** · normal · quantidade: {r['quantidade']} "
+                          f"(equipados: {r['equipado']})\n   Bônus: {bonus}{venda}")
+    await enviar_longo(
+        ctx,
+        f"🎒 **Inventário · {f['nome']}**\n"
+        f"Saldo: **{f['moedas']}** 💰\n\n"
+        "🟢 equipado · ⚪ guardado · 🍖 consumível · 💱 item que pode ser vendido\n\n"
+        + "\n\n".join(linhas)
+    )
 
 
 @bot.command(name="pegar")
@@ -2269,26 +2310,36 @@ async def darmoedas(ctx, *, raw: str = ""):
 
 
 def texto_loja() -> str:
-    linhas = ["🏪 **loja** — `!comprar [pers] [item] [qtd]` • `!vender [pers] [item] [qtd|tudo]` "
-              "(a loja paga metade do preco)", "", "**consumíveis**"]
+    linhas = [
+        "🏪 **Loja**",
+        "Compre com `!comprar [personagem] [item ou habilidade] [quantidade]`.",
+        "Venda com `!vender [personagem] [item] [quantidade ou tudo]` · a loja paga metade do preço.",
+        "",
+        "**Consumíveis** · usados para recuperar corpo ou mente",
+    ]
     for nome in CONSUMIVEIS:
         c = CATALOGO[nome]
         linhas.append(f"• **{nome}** — {c['preco']} 💰 ({fmt_bonus(c['bonus'])})")
-    linhas += ["", "**equipamentos** (o bonus sobe com a raridade)"]
+    linhas += ["", "**Equipamentos** · o bônus aumenta conforme a raridade"]
     for base, gen, attrs in EQUIPAMENTOS:
         precos = []
         for t in range(3):
             c = CATALOGO[nome_equip(base, gen, t)]
-            req = f", nv {c['nivel']}+" if c["nivel"] > 1 else ""
-            precos.append(f"{TIERS[t][0 if gen == 'm' else 1]} {c['preco']} 💰 ({fmt_bonus(c['bonus'])}{req})")
-        linhas.append(f"• **{base}** — " + " • ".join(precos))
-    linhas.append(f"\nitens lendarios so aparecem nas dungeons (a loja paga {PRECO_TIER[3] // 2} 💰 por eles).")
-    linhas += ["", "**habilidades** (aprenda com `!comprar [pers] [habilidade]`)"]
+            nivel = f" · nível mínimo {c['nivel']}" if c["nivel"] > 1 else ""
+            precos.append(f"  • {TIERS[t][0 if gen == 'm' else 1]} · {c['preco']} 💰"
+                          f" · bônus: {fmt_bonus(c['bonus'])}{nivel}")
+        linhas.append(f"**{base}**\n" + "\n".join(precos))
+    linhas.append(f"Equipamentos lendários só aparecem nas dungeons. "
+                  f"A loja paga {PRECO_TIER[3] // 2} 💰 por eles.")
+    linhas += ["", "**Habilidades** · aprenda com `!comprar [personagem] [habilidade]`"]
     if HABILIDADES_LOJA:
         for habilidade in HABILIDADES_LOJA:
-            linhas.append(f"• **{habilidade['nome']}** — {habilidade['preco']} 💰 "
-                          f"({fmt_bonus(habilidade['bonus'])} • {fmt_duracao_hab(habilidade['bonus'], habilidade['duracao'])} "
-                          f"• tipo {nome_tipo_habilidade(habilidade['modo'])})")
+            linhas.append(
+                f"• **{habilidade['nome']}** · {habilidade['preco']} 💰\n"
+                f"  Efeito: {fmt_bonus(habilidade['bonus'])} · "
+                f"Duração: {fmt_duracao_hab(habilidade['bonus'], habilidade['duracao'])} · "
+                f"Tipo: {nome_tipo_habilidade(habilidade['modo'])}"
+            )
     else:
         linhas.append("• nenhuma habilidade disponivel no momento.")
     return "\n".join(linhas)
@@ -2519,9 +2570,14 @@ async def status(ctx, *, raw: str = ""):
         return
     linhas = []
     for r in rows:
-        dur = f"{r['duracao']} turno(s) restante(s)" if r["duracao"] else "sem duracao definida"
-        linhas.append(f"🧪 **{r['nome']}** ({r['tipo']}) — {fmt_bonus(json.loads(r['bonus']), r['tipo'] == 'dinamico')} • {dur}")
-    await enviar_longo(ctx, f"**status de {f['nome']}** ({len(rows)} ativo(s))\n" + "\n".join(linhas))
+        dur = f"{r['duracao']} turno(s) restante(s)" if r["duracao"] else "duração indefinida"
+        tipo = "efeito por turno" if r["tipo"] == "dinamico" else "bônus de atributo"
+        linhas.append(f"🧪 **{r['nome']}** · {tipo}\n"
+                      f"   Efeito: {fmt_bonus(json.loads(r['bonus']), r['tipo'] == 'dinamico')} · {dur}")
+    await enviar_longo(
+        ctx,
+        f"🛡️ **Status ativos · {f['nome']}** ({len(rows)})\n\n" + "\n\n".join(linhas)
+    )
 
 
 @bot.command(name="rmstatus")
@@ -2759,7 +2815,7 @@ async def limpar(ctx, *, raw: str = ""):
         return
     if not await confirmar(ctx, f"apagar todos os {qtd} item(ns) de **{f['nome']}**?"):
         return
-    itens = [{k: r[k] for k in ("nome", "quantidade", "bonus", "equipado", "tipo")}
+    itens = [{k: r[k] for k in ("nome", "quantidade", "bonus", "equipado", "tipo", "vendaveis")}
              for r in db.execute("SELECT * FROM itens WHERE ficha_id=?", (f["id"],))]
     guardar_lixeira(ctx, "itens", f"{qtd} item(ns) de {f['nome']}",
                     {"ficha_id": f["id"], "ficha_nome": f["nome"], "itens": itens})
@@ -2905,13 +2961,19 @@ async def habilidades(ctx, *, raw: str = ""):
         return
     linhas = []
     for r in rows:
-        texto = (f"{'🟢' if r['ativa'] else '⚪'} **{r['nome']}** "
-                 f"[{nome_tipo_habilidade(r['modo'])}] — {fmt_bonus(json.loads(r['bonus']))} • "
-                 f"{fmt_duracao_hab(json.loads(r['bonus']), r['duracao'])}")
+        estado = "ativa" if r["ativa"] else "inativa"
+        texto = (f"{'🟢' if r['ativa'] else '⚪'} **{r['nome']}** · {estado}\n"
+                 f"   Tipo: {nome_tipo_habilidade(r['modo'])} · "
+                 f"Efeito: {fmt_bonus(json.loads(r['bonus']))} · "
+                 f"Duração: {fmt_duracao_hab(json.loads(r['bonus']), r['duracao'])}")
         if r["ativa"] and r["restam"] is not None:
-            texto += f" • {r['restam']} turno(s) restante(s)"
+            texto += f" · Restam {r['restam']} turno(s)"
         linhas.append(texto)
-    await enviar_longo(ctx, f"✨ **habilidades de {f['nome']}** (🟢 ativa • ⚪ inativa)\n" + "\n".join(linhas))
+    await enviar_longo(
+        ctx,
+        f"✨ **Habilidades · {f['nome']}**\n"
+        "🟢 ativa · ⚪ inativa\n\n" + "\n\n".join(linhas)
+    )
 
 
 def ativar_habilidade(f, hab) -> list:
@@ -3210,8 +3272,10 @@ async def restaurar(ctx, *, raw: str = ""):
                 if get_item(f["id"], r["nome"], exato=True):
                     pulados += 1
                     continue
-                db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo) VALUES (?, ?, ?, ?, ?, ?)",
-                           (f["id"], r["nome"], r["quantidade"], r["bonus"], r["equipado"], r["tipo"]))
+                db.execute("INSERT INTO itens (ficha_id, nome, quantidade, bonus, equipado, tipo, vendaveis) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (f["id"], r["nome"], r["quantidade"], r["bonus"], r["equipado"], r["tipo"],
+                            r.get("vendaveis", 0)))
                 feitos += 1
             rotulo = "item(ns)"
         else:
@@ -3868,7 +3932,7 @@ class EmCombate(commands.CheckFailure):
 
 # comandos que nao valem para quem esta no meio de um combate (as acoes certas sao !atacar, !usar...)
 BLOQUEADOS_EM_COMBATE = {
-    "mudar", "nivel", "equipar", "desequipar", "usaritem", "usarh", "desativarh", "turno",
+    "mudar", "nivel", "equipar", "desequipar", "usaritem", "desativarh", "turno",
     "dano", "descartar", "limpar", "addstatus", "rmstatus", "apagarh", "deletartudo", "deletar",
     "mudardono", "upar", "transferir", "pix", "comprar", "vender", "darmoedas",
 }
@@ -4276,8 +4340,8 @@ async def limpar_dungeons():
             if canal:
                 try:
                     await canal.send("⌛ dungeon encerrada por inatividade. as fichas que estavam nela foram mantidas.")
-                except Exception:
-                    pass
+                except discord.HTTPException as erro:
+                    print(f"nao foi possivel avisar sobre a dungeon inativa no canal {cid}: {erro}")
 
 
 # eventos de decisao (acampamento)
@@ -5005,22 +5069,36 @@ async def dungeon(ctx, *, raw: str = ""):
         await dg_ranking(ctx)
     else:
         dificuldades = "\n".join(
-            f"• **{k}** (niveis {v['niveis'][0]}-{v['niveis'][1]}) — {v['andares']} andares, inimigos "
-            f"{int(v['fator'] * 100)}% da sua forca, xp x{v['xp']}, moedas x{v['moedas']}, "
-            f"loot comum {int(v['chance_loot'] * 100)}%"
-            for k, v in DIFICULDADES.items())
-        temas = ", ".join(f"`{k}`" for k in TEMAS)
+            f"• **{k.title()}** · níveis {v['niveis'][0]}–{v['niveis'][1]} · {v['andares']} andares\n"
+            f"  Inimigos: {int(v['fator'] * 100)}% da força de referência · "
+            f"XP: ×{v['xp']} · moedas: ×{v['moedas']} · saque comum: {int(v['chance_loot'] * 100)}%"
+            for k, v in DIFICULDADES.items()
+        )
+        temas = " · ".join(f"`{k}` — {tema['nome']}" for k, tema in TEMAS.items())
         await enviar_longo(ctx, (
-            "🏰 **dungeons** — solo ou em grupo (ate 4), no canal atual.\n"
-            "`!dungeon criar [dificuldade] [tema] [ficha]` • `!dungeon entrar [ficha]` • `!dungeon iniciar` • "
-            "`!dungeon avancar` • `!dungeon status` • `!dungeon ranking` • `!dungeon sair`\n"
-            f"faixas sugeridas (sem bloquear outros niveis): facil 1-5 • medio 6-10 • dificil 11-15 • "
-            f"pesadelo 16-20\n{dificuldades}\ntemas: {temas}\n"
-            "⚠️ **corpo em 0 = a ficha e apagada para sempre.** cada andar limpo da xp, moedas e itens; o ultimo tem um chefe.\n"
-            "🎁 o chefe sempre deixa equipamento; a chance de consumível e maior nas dificuldades altas. a raridade dos equipamentos tambem acompanha a dificuldade.\n"
-            "🎲 eventos no acampamento incluem baus, armadilhas, altares, fontes, pontes e bibliotecas; todos votam com `!escolher`.\n"
-            "🏆 quem mais matar ate o fim e o **MVP** e ganha moedas extras (`!ranking` mostra o geral).\n"
-            "⚔️ `int` e `for` causam dano fisico ao corpo. veja `!ajuda dungeon` para as acoes de combate."))
+            "🏰 **Dungeons**\n"
+            "Explore sozinho ou em um grupo de até 4 jogadores. A dungeon fica no canal em que foi criada.\n\n"
+            "**Comandos**\n"
+            "• Criar: `!dungeon criar [dificuldade] [tema] [ficha]`\n"
+            "• Entrar no grupo: `!dungeon entrar [ficha]`\n"
+            "• Iniciar ou avançar: `!dungeon iniciar` · `!dungeon avancar`\n"
+            "• Consultar: `!dungeon status` · `!dungeon ranking`\n"
+            "• Sair no lobby ou acampamento: `!dungeon sair`\n\n"
+            "**Dificuldades sugeridas**\n"
+            f"{dificuldades}\n\n"
+            f"**Temas disponíveis:** {temas}\n\n"
+            "⚠️ **Risco permanente:** se o corpo chegar a 0, a ficha será apagada e não poderá ser restaurada.\n"
+            "Cada andar vencido concede XP, moedas e uma chance de encontrar itens. O último andar tem um chefe; "
+            "ele sempre deixa equipamento.\n\n"
+            "**Eventos e ranking**\n"
+            "No acampamento podem surgir eventos. Nos eventos de grupo, todos votam; nos individuais, "
+            "a escolha cabe ao explorador indicado. Use `!escolher` para votar ou decidir.\n"
+            "Quem acumular mais abates entre os participantes que concluírem a dungeon pode receber o prêmio de MVP. "
+            "Consulte `!ranking` para ver o ranking do servidor.\n\n"
+            "**Combate**\n"
+            "Força e inteligência contribuem para o dano ao corpo. Consulte `!ajuda atacar` e `!ajuda usarh` "
+            "para ver os detalhes das ações."
+        ))
 
 
 # comandos: acoes de combate
